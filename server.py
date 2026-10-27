@@ -80,7 +80,8 @@ async def _verify(claim: str, reference: str, expected_title: str = "",
     if resolved.get("retracted"):
         result = {
             "verdict": "UNSUPPORTED", "confidence": 0.9, "band": "High",
-            "evidence": [], "evidence_rejected": [], "distortion_type": "none",
+            "evidence": [], "evidence_rejected": [], "aspects": [],
+            "distortion_type": "none",
             "distortion_note": "",
             "claim_aspects_unmet": ["The cited paper is retracted."],
             "rationale": "Source is retracted; it cannot support the claim.",

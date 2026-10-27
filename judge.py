@@ -32,35 +32,53 @@ DISTORTION_LABELS = {
     "other": "other",
 }
 
+ASPECT_TYPES = ("population", "intervention", "outcome", "direction",
+                "magnitude", "other")
+ASPECT_STATUSES = ("ENTAILED", "CONTRADICTED", "ABSENT")
+
 _SYSTEM = """You are a strict scientific evidence judge. You decide whether a \
 CLAIM is supported by the PAPER TEXT provided, and nothing else.
+
+First DECOMPOSE the claim into its atomic, independently checkable aspects. \
+Use these types where they apply:
+- "population": who or what the claim is about (species, patients, setting).
+- "intervention": the exposure, treatment, or variable acted on.
+- "outcome": what was measured or affected.
+- "direction": the sign of the effect (increase / decrease / no effect).
+- "magnitude": how large the effect is — ONLY include this if the claim \
+actually asserts a size.
+Only create an aspect for something the CLAIM actually asserts. A claim is only \
+as strong as its weakest asserted aspect.
+
+Rule on EACH aspect separately, using ONLY the provided text:
+- "ENTAILED": the text directly establishes this aspect — give a VERBATIM quote.
+- "CONTRADICTED": the text states the opposite — give a VERBATIM quote.
+- "ABSENT": the text does not address this aspect — quote must be "".
 
 Rules, in order:
 1. Weigh the RESULTS and CONCLUSION sections above the title and abstract. \
 Abstracts overstate; results qualify.
-2. Use ONLY the provided text. Never use outside knowledge. If the text does \
-not address the claim, the verdict is INSUFFICIENT.
+2. Use ONLY the provided text. Never use outside knowledge.
 3. Quote VERBATIM. Every quote must be copied exactly from the paper text, \
 word for word, including numbers and punctuation. Never paraphrase inside a \
 quote.
-4. Decide the verdict:
-   - SUPPORTED: the paper's results directly establish the claim as stated.
-   - OVERSTATED: the paper supports a weaker version, but the claim exaggerates \
-(e.g. correlation reported as causation, an animal result stated for humans, \
-caveats dropped, a non-significant or small effect stated as proven, a \
-subgroup/secondary outcome presented as the main finding).
-   - UNSUPPORTED: the paper does not support, or contradicts, the claim.
-   - INSUFFICIENT: the available text cannot settle it.
-5. If OVERSTATED, name the distortion type and explain the gap with a quote \
-pair (what the paper says vs. what the claim says).
-6. Surface any claim aspect the text does not establish (magnitude, direction, \
-population, causality)."""
+4. Give an overall verdict consistent with the aspects:
+   - SUPPORTED: every asserted aspect is ENTAILED.
+   - OVERSTATED: the core relationship holds, but a qualifier (magnitude, \
+population, causality) is unestablished or exaggerated (correlation stated as \
+causation, an animal result stated for humans, caveats dropped, a small effect \
+stated as proven, a subgroup presented as the main finding).
+   - UNSUPPORTED: the paper contradicts the claim's core.
+   - INSUFFICIENT: the core relationship itself is absent from the text.
+5. If OVERSTATED, name the distortion type and explain the gap."""
 
 # Appended for backends that can't use tool-use (MCP sampling): demand JSON.
 _JSON_INSTRUCTIONS = (
     "\n\nReturn ONLY a single JSON object and no other text. Keys: "
     '"verdict" (one of SUPPORTED|OVERSTATED|UNSUPPORTED|INSUFFICIENT), '
     '"confidence" (number 0-1), '
+    '"aspects" (array of objects {"type"(' + "|".join(ASPECT_TYPES) + '),'
+    '"text","status"(ENTAILED|CONTRADICTED|ABSENT),"quote","note"}), '
     '"evidence" (array of objects {"quote","section","stance"(ENTAILS|CONTRADICTS|NEUTRAL),"reason"}), '
     '"distortion_type" (one of ' + "|".join(DISTORTIONS) + '), '
     '"distortion_note" (string), '
@@ -77,6 +95,20 @@ _TOOL = {
         "properties": {
             "verdict": {"type": "string", "enum": list(VERDICTS)},
             "confidence": {"type": "number"},
+            "aspects": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "type": {"type": "string", "enum": list(ASPECT_TYPES)},
+                        "text": {"type": "string"},
+                        "status": {"type": "string", "enum": list(ASPECT_STATUSES)},
+                        "quote": {"type": "string"},
+                        "note": {"type": "string"},
+                    },
+                    "required": ["type", "text", "status"],
+                },
+            },
             "evidence": {
                 "type": "array",
                 "items": {
@@ -96,7 +128,7 @@ _TOOL = {
             "claim_aspects_unmet": {"type": "array", "items": {"type": "string"}},
             "rationale": {"type": "string"},
         },
-        "required": ["verdict", "confidence", "evidence", "rationale"],
+        "required": ["verdict", "confidence", "aspects", "rationale"],
     },
 }
 
@@ -151,15 +183,67 @@ def sampling_system() -> str:
 def no_text_result(reason: str = "No paper text could be retrieved.") -> dict:
     return {
         "verdict": "INSUFFICIENT", "confidence": 0.0, "band": "Low",
-        "evidence": [], "evidence_rejected": [], "distortion_type": "none",
+        "evidence": [], "evidence_rejected": [], "aspects": [],
+        "distortion_type": "none",
         "distortion_note": "", "claim_aspects_unmet": [reason],
         "rationale": reason, "quotes_verified": 0, "downgraded": False,
     }
 
 
+# The verdict is DERIVED from grounded aspects, not trusted from the model —
+# the anti-"confident-wrong" guard (e.g. SUPPORTED with an ABSENT magnitude).
+_CORE_TYPES = {"outcome", "direction"}
+_VERDICT_CEIL = {"SUPPORTED": 1.0, "OVERSTATED": 0.6,
+                 "UNSUPPORTED": 0.9, "INSUFFICIENT": 0.4}
+
+
+def _check_aspects(aspects: list, haystack_norm: str) -> list:
+    checked = []
+    for a in aspects or []:
+        st = (a.get("status") or "").upper()
+        quote = a.get("quote") or ""
+        verified = _quote_verified(quote, haystack_norm) if quote else False
+        if st in ("ENTAILED", "CONTRADICTED") and not verified:
+            st = "ABSENT"
+        checked.append({
+            "type": (a.get("type") or "other").lower(),
+            "text": a.get("text", ""),
+            "status": st,
+            "quote": quote if verified else "",
+            "note": a.get("note", ""),
+        })
+    return checked
+
+
+def _derive_from_aspects(checked: list):
+    if not checked:
+        return None
+    core = [a for a in checked if a["type"] in _CORE_TYPES]
+    any_core_contra = any(a["status"] == "CONTRADICTED" for a in core)
+    any_contra = any(a["status"] == "CONTRADICTED" for a in checked)
+    all_entailed = all(a["status"] == "ENTAILED" for a in checked)
+    core_ok = bool(core) and all(a["status"] == "ENTAILED" for a in core)
+    if any_core_contra:
+        verdict = "UNSUPPORTED"
+    elif any_contra:
+        verdict = "OVERSTATED"
+    elif all_entailed:
+        verdict = "SUPPORTED"
+    elif core_ok:
+        verdict = "OVERSTATED"
+    elif not core:
+        verdict = "SUPPORTED" if all_entailed else "INSUFFICIENT"
+    else:
+        verdict = "INSUFFICIENT"
+    unmet = [f"{a['type']}{(' — ' + a['text']) if a['text'] else ''} "
+             "(not established in the text)"
+             for a in checked if a["status"] == "ABSENT"]
+    return verdict, unmet
+
+
 def finalize(data: dict, fetched: dict) -> dict:
-    """Apply the quote-verification guard + confidence caps to a raw judgement
-    (from any backend) and return the normalized result dict."""
+    """Apply the quote-verification guard + aspect-derived verdict + confidence
+    caps to a raw judgement (from any backend) and return the normalized dict."""
     haystack = _norm(fetched.get("full_text", ""))
     verified = []
     for ev in data.get("evidence", []) or []:
@@ -168,22 +252,38 @@ def finalize(data: dict, fetched: dict) -> dict:
         if ok:
             verified.append(ev)
 
+    aspects = _check_aspects(data.get("aspects"), haystack)
+    aspect_quotes = sum(1 for a in aspects if a["quote"])
+
     result = {
         "verdict": data.get("verdict", "INSUFFICIENT"),
         "confidence": float(data.get("confidence", 0.0) or 0.0),
         "evidence": verified,
         "evidence_rejected": [e for e in (data.get("evidence") or [])
                               if not e.get("verified")],
+        "aspects": aspects,
         "distortion_type": data.get("distortion_type", "none"),
         "distortion_note": data.get("distortion_note", ""),
         "claim_aspects_unmet": list(data.get("claim_aspects_unmet", []) or []),
         "rationale": data.get("rationale", ""),
-        "quotes_verified": len(verified),
+        "quotes_verified": len(verified) + aspect_quotes,
         "downgraded": False,
     }
 
+    derived = _derive_from_aspects(aspects)
+    if derived:
+        verdict, unmet = derived
+        if verdict != result["verdict"]:
+            result["verdict_model"] = data.get("verdict")
+        result["verdict"] = verdict
+        for u in unmet:
+            if u not in result["claim_aspects_unmet"]:
+                result["claim_aspects_unmet"].append(u)
+        result["confidence"] = min(result["confidence"],
+                                   _VERDICT_CEIL.get(verdict, 1.0))
+
     if result["verdict"] in ("SUPPORTED", "OVERSTATED", "UNSUPPORTED") \
-            and not verified:
+            and not verified and not aspect_quotes:
         result["verdict"] = "INSUFFICIENT"
         result["downgraded"] = True
         result["confidence"] = min(result["confidence"], 0.3)

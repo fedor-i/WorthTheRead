@@ -36,8 +36,21 @@ def render_card(r: dict) -> str:
                                      str(res.get("year") or "")) if x)
         lines.append(f"**Paper:** {cite}" + (f" ({meta})" if meta else ""))
 
+    asps = r.get("aspects") or []
+    if asps:
+        icon = {"ENTAILED": "✓", "CONTRADICTED": "✗", "ABSENT": "—"}
+        lines.append("")
+        lines.append("**Claim breakdown** (each piece checked separately):")
+        for a in asps:
+            mark = icon.get(a.get("status"), "?")
+            lines.append(f"- {mark} **{a.get('type', '')}** — {a.get('text', '')}")
+            if a.get("quote"):
+                lines.append(f"  > “{a['quote']}”")
+
+    # Aspects already carry the verified quotes; show the standalone evidence
+    # block only when there's no decomposition.
     ev = r.get("evidence") or []
-    if ev:
+    if ev and not asps:
         lines.append("")
         lines.append("**Verified evidence:**")
         for e in ev[:3]:

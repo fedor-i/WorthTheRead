@@ -156,8 +156,24 @@ async function fetchText(resolved) {
 
 // ---------- judge (Anthropic, direct fetch) + the guard ----------
 const SYSTEM = `You are a strict scientific evidence judge. You decide whether a CLAIM is supported by the PAPER TEXT provided, and nothing else.
-Rules: (1) Weigh RESULTS/CONCLUSION over title/abstract. (2) Use ONLY the provided text; if it does not address the claim, verdict is INSUFFICIENT. (3) Quote VERBATIM, copied exactly from the paper text. (4) SUPPORTED = results directly establish the claim; OVERSTATED = paper supports a weaker version (correlation stated as causation, animal result applied to humans, caveats dropped, non-significant/small effect stated as proven, subgroup presented as main finding); UNSUPPORTED = not supported or contradicted; INSUFFICIENT = text cannot settle it. (5) If OVERSTATED name the distortion and give a quote pair. (6) List any claim aspect not established.
-Return ONLY one JSON object: {"verdict","confidence"(0-1),"evidence":[{"quote","section","stance":"ENTAILS|CONTRADICTS|NEUTRAL","reason"}],"distortion_type":"none|correlation_causation|animal_to_human|dropped_caveats|effect_size_spin|cherry_picking|other","distortion_note","claim_aspects_unmet":[],"rationale"}`;
+
+First DECOMPOSE the claim into its atomic, independently checkable aspects. Use these types where they apply:
+- "population": who or what the claim is about (species, patients, setting).
+- "intervention": the exposure, treatment, or variable acted on.
+- "outcome": what was measured or affected.
+- "direction": the sign of the effect (increase / decrease / no effect / association direction).
+- "magnitude": how large the effect is — ONLY include this aspect if the claim actually asserts a size.
+Only create an aspect for something the CLAIM actually asserts. A claim is only as strong as its weakest asserted aspect.
+
+Rule on EACH aspect separately, using ONLY the provided text:
+- "ENTAILED": the text directly establishes this aspect — give a VERBATIM quote.
+- "CONTRADICTED": the text states the opposite — give a VERBATIM quote.
+- "ABSENT": the text does not address this aspect — quote must be "".
+Weigh RESULTS/CONCLUSION over the title/abstract. Quote VERBATIM, copied exactly from the paper text (numbers and punctuation included); never paraphrase inside a quote.
+
+Then give an overall verdict and a one-sentence rationale CONSISTENT with the aspects (SUPPORTED only if every asserted aspect is ENTAILED; OVERSTATED if the core relationship holds but a qualifier like magnitude/population is unestablished or exaggerated; UNSUPPORTED if contradicted; INSUFFICIENT if the core relationship itself is absent). If OVERSTATED, name the distortion type.
+
+Return ONLY one JSON object: {"verdict","confidence"(0-1),"aspects":[{"type":"population|intervention|outcome|direction|magnitude|other","text":"the sub-claim in words","status":"ENTAILED|CONTRADICTED|ABSENT","quote":"verbatim or empty","note":""}],"evidence":[{"quote","section","stance":"ENTAILS|CONTRADICTS|NEUTRAL","reason"}],"distortion_type":"none|correlation_causation|animal_to_human|dropped_caveats|effect_size_spin|cherry_picking|other","distortion_note","claim_aspects_unmet":[],"rationale"}`;
 
 // Normalize unicode punctuation (curly quotes, dashes, non-breaking spaces)
 // so a verbatim quote isn't rejected over a typographic variant.
@@ -187,22 +203,72 @@ const band = (c) => c >= 0.75 ? "High" : c >= 0.45 ? "Med" : "Low";
 const DISTORTION_LABELS = { none:"none", correlation_causation:"correlation→causation", animal_to_human:"animal→human",
   dropped_caveats:"dropped caveats", effect_size_spin:"effect-size spin", cherry_picking:"cherry-picking", other:"other" };
 
+// Verify each decomposed aspect's quote, then DERIVE the verdict from the
+// grounded aspects rather than trusting the model's own verdict. This is what
+// stops a confident-but-wrong "SUPPORTED" when, e.g., the magnitude aspect is
+// unestablished — the verdict is a transparent function of the aspect statuses.
+const CORE_TYPES = new Set(["outcome", "direction"]);
+const VERDICT_CEIL = { SUPPORTED: 1.0, OVERSTATED: 0.6, UNSUPPORTED: 0.9, INSUFFICIENT: 0.4 };
+function checkAspects(aspects, hay) {
+  return (aspects || []).map(a => {
+    const st = (a.status || "").toUpperCase();
+    const q = a.quote || "";
+    const verified = q ? quoteVerified(q, hay) : false;
+    // an ENTAILED/CONTRADICTED aspect whose quote can't be verified falls to ABSENT
+    const status = ((st === "ENTAILED" || st === "CONTRADICTED") && !verified) ? "ABSENT" : st;
+    return { type: (a.type || "other").toLowerCase(), text: a.text || "",
+             status, quote: verified ? q : "", note: a.note || "" };
+  });
+}
+function deriveFromAspects(checked) {
+  if (!checked.length) return null;
+  const core = checked.filter(a => CORE_TYPES.has(a.type));
+  const anyCoreContra = core.some(a => a.status === "CONTRADICTED");
+  const anyContra = checked.some(a => a.status === "CONTRADICTED");
+  const allEntailed = checked.every(a => a.status === "ENTAILED");
+  const coreOk = core.length > 0 && core.every(a => a.status === "ENTAILED");
+  let verdict;
+  if (anyCoreContra) verdict = "UNSUPPORTED";
+  else if (anyContra) verdict = "OVERSTATED";                 // wrong on a qualifier
+  else if (allEntailed) verdict = "SUPPORTED";
+  else if (coreOk) verdict = "OVERSTATED";                    // core holds; a qualifier (magnitude/population) unestablished
+  else if (core.length === 0) verdict = allEntailed ? "SUPPORTED" : "INSUFFICIENT";
+  else verdict = "INSUFFICIENT";                              // core relationship itself not established
+  const unmet = checked.filter(a => a.status === "ABSENT")
+    .map(a => `${a.type}${a.text ? ` — ${a.text}` : ""} (not established in the text)`);
+  return { verdict, unmet };
+}
 function finalize(data, fetched) {
   const hay = norm(fetched.full_text);
   const verified = [];
   for (const ev of (data.evidence || [])) { ev.verified = quoteVerified(ev.quote, hay); if (ev.verified) verified.push(ev); }
+  const aspects = checkAspects(data.aspects, hay);
+  const aspectQuotesVerified = aspects.filter(a => a.quote).length;
   const r = {
     verdict: data.verdict || "INSUFFICIENT",
     confidence: Number(data.confidence) || 0,
     evidence: verified,
+    aspects,
     distortion_type: data.distortion_type || "none",
     distortion_note: data.distortion_note || "",
     claim_aspects_unmet: (data.claim_aspects_unmet || []).slice(),
     rationale: data.rationale || "",
-    quotes_verified: verified.length,
+    quotes_verified: verified.length + aspectQuotesVerified,
     downgraded: false,
   };
-  if (["SUPPORTED","OVERSTATED","UNSUPPORTED"].includes(r.verdict) && !verified.length) {
+
+  // Derive the verdict from grounded aspects when the model provided a decomposition.
+  const derived = deriveFromAspects(aspects);
+  if (derived) {
+    if (derived.verdict !== r.verdict) r.verdict_model = data.verdict || null; // keep the model's own call for transparency
+    r.verdict = derived.verdict;
+    for (const u of derived.unmet) if (!r.claim_aspects_unmet.includes(u)) r.claim_aspects_unmet.push(u);
+    r.confidence = Math.min(r.confidence, VERDICT_CEIL[r.verdict] ?? 1.0);
+  }
+
+  // Core anti-hallucination guard: a non-INSUFFICIENT verdict needs at least one
+  // verified quote somewhere (evidence or an aspect).
+  if (["SUPPORTED","OVERSTATED","UNSUPPORTED"].includes(r.verdict) && !verified.length && !aspectQuotesVerified) {
     r.verdict = "INSUFFICIENT"; r.downgraded = true; r.confidence = Math.min(r.confidence, 0.3);
     r.claim_aspects_unmet.push("No quoted evidence could be verified against the source text.");
   }
@@ -211,7 +277,7 @@ function finalize(data, fetched) {
   return r;
 }
 function noTextResult(reason) {
-  return { verdict:"INSUFFICIENT", confidence:0, band:"Low", evidence:[], distortion_type:"none",
+  return { verdict:"INSUFFICIENT", confidence:0, band:"Low", evidence:[], aspects:[], distortion_type:"none",
     distortion_note:"", claim_aspects_unmet:[reason], rationale:reason, quotes_verified:0, downgraded:false };
 }
 function parseJsonVerdict(text, fetched) {
@@ -250,7 +316,7 @@ async function verifyClaim(claim, reference, key, model) {
   const fetched = await fetchText(res);
   let result;
   if (res.retracted) {
-    result = { verdict:"UNSUPPORTED", confidence:0.9, band:"High", evidence:[], distortion_type:"none",
+    result = { verdict:"UNSUPPORTED", confidence:0.9, band:"High", evidence:[], aspects:[], distortion_type:"none",
       distortion_note:"", claim_aspects_unmet:["The cited paper is retracted."],
       rationale:"Source is retracted; it cannot support the claim.", quotes_verified:0, downgraded:false };
   } else {
@@ -504,7 +570,13 @@ function cardHTML(r, hideClaim=false) {
   const BADGE = { SUPPORTED:"✓ SUPPORTED", OVERSTATED:"⚠ OVERSTATED", UNSUPPORTED:"✗ UNSUPPORTED", INSUFFICIENT:"— INSUFFICIENT EVIDENCE" };
   const res = r.resolved || {};
   const status = [ r.citation_ok?"link ✓":"link ⚠", r.retracted?"<b>RETRACTED</b>":(r.concern?"concern":""), r.has_results?"full text ✓":"abstract only ⚠" ].filter(Boolean).join(" · ");
-  let ev = (r.evidence||[]).slice(0,3).map(e => `<blockquote>“${esc(e.quote)}”${e.section?` — §${esc(e.section)}`:""}</blockquote>`).join("");
+  const ASPECT_ICON = { ENTAILED:"✓", CONTRADICTED:"✗", ABSENT:"—" };
+  const asps = r.aspects || [];
+  let asp = asps.length ? `<div class="aspects"><div class="meta"><b>Claim breakdown</b> — each piece checked separately:</div>`
+    + asps.map(a => `<div class="aspect ${esc(a.status)}"><span class="achip ${esc(a.status)}">${ASPECT_ICON[a.status]||"?"} ${esc(a.type)}</span> ${esc(a.text)}${a.quote?`<blockquote>“${esc(a.quote)}”</blockquote>`:""}</div>`).join("")
+    + `</div>` : "";
+  // Aspects already carry the verified quotes; only show the separate evidence block when there's no decomposition.
+  let ev = asps.length ? "" : (r.evidence||[]).slice(0,3).map(e => `<blockquote>“${esc(e.quote)}”${e.section?` — §${esc(e.section)}`:""}</blockquote>`).join("");
   let why = r.rationale ? `<p class="meta"><b>Why:</b> ${esc(r.rationale)}</p>` : "";
   let dist = (r.verdict==="OVERSTATED" && r.distortion_note) ? `<p><span class="tag">${esc(DISTORTION_LABELS[r.distortion_type]||r.distortion_type)}</span> ${esc(r.distortion_note)}</p>` : "";
   let unmet = (r.claim_aspects_unmet||[]).length ? `<p class="meta"><b>Not established:</b> ${esc(r.claim_aspects_unmet.join("; "))}</p>` : "";
@@ -518,6 +590,7 @@ function cardHTML(r, hideClaim=false) {
     ${hideClaim ? "" : `<p><b>Claim:</b> ${esc(r.claim)}</p>`}
     ${res.title?`<p class="meta"><b>Paper:</b> ${esc(res.title)}${res.year?` (${esc(res.year)})`:""}${res.doi?` · <a href="https://doi.org/${esc(res.doi)}" target="_blank" rel="noopener">${esc(res.doi)}</a>`:""}</p>`:""}
     ${trust?`<p class="meta">${esc(trust)}</p>`:""}
+    ${asp}
     ${ev?`<div><b>Verified evidence:</b>${ev}</div>`:""}
     ${why}${dist}${unmet}
   </div>`;
