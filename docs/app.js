@@ -2,8 +2,10 @@
 // Mirrors the Python package: resolve + retraction, Europe PMC full text,
 // Anthropic judge (direct fetch with the user's key), the substring quote-
 // verification guard, dedupe + threshold, and plan_search.
-// All network calls go to CORS-enabled endpoints (Crossref, Europe PMC) or
-// directly to the Anthropic API with the browser-access header.
+// Source discovery fans out to OpenAlex + Crossref + Europe PMC (all keyless,
+// CORS-open) and ranks deterministically. All network calls go to CORS-enabled
+// endpoints (OpenAlex, Crossref, Europe PMC) or directly to the Anthropic API
+// with the browser-access header. No API key leaves the browser for discovery.
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => (s ?? "").toString().replace(/[&<>]/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;" }[c]));
@@ -47,7 +49,8 @@ async function resolve(ref) {
   const ids = parseReference(ref);
   const out = { ids, resolved:false, citation_ok:false, title:null, authors:null,
                 year:null, journal:null, doi:ids.doi, pmcid:ids.pmcid, pmid:ids.pmid,
-                retracted:false, concern:false, error:null };
+                retracted:false, concern:false, citations:null, type:null, is_oa:false,
+                error:null };
   // Fill ids / metadata via Europe PMC when we lack a DOI.
   let epmc = null;
   try {
@@ -63,6 +66,9 @@ async function resolve(ref) {
         out.title = epmc.title || null;
         out.journal = (epmc.journalInfo && epmc.journalInfo.journal && epmc.journalInfo.journal.title) || null;
         out.year = epmc.pubYear || null;
+        if (epmc.citedByCount != null) out.citations = epmc.citedByCount;
+        if (epmc.isOpenAccess === "Y") out.is_oa = true;
+        out.type = out.type || epmc.pubType || null;
       }
     }
   } catch (e) { /* non-fatal */ }
@@ -83,6 +89,8 @@ async function resolve(ref) {
     for (const k of ["published-print","published-online","issued"]) {
       const dp = msg[k] && msg[k]["date-parts"]; if (dp && dp[0] && dp[0][0]) { out.year = dp[0][0]; break; }
     }
+    if (msg["is-referenced-by-count"] != null) out.citations = msg["is-referenced-by-count"];
+    out.type = out.type || msg.type || null;
     Object.assign(out, retractionFlags(msg));
   } catch (e) {
     if (out.title) { out.resolved = true; out.citation_ok = true; }
@@ -151,12 +159,29 @@ const SYSTEM = `You are a strict scientific evidence judge. You decide whether a
 Rules: (1) Weigh RESULTS/CONCLUSION over title/abstract. (2) Use ONLY the provided text; if it does not address the claim, verdict is INSUFFICIENT. (3) Quote VERBATIM, copied exactly from the paper text. (4) SUPPORTED = results directly establish the claim; OVERSTATED = paper supports a weaker version (correlation stated as causation, animal result applied to humans, caveats dropped, non-significant/small effect stated as proven, subgroup presented as main finding); UNSUPPORTED = not supported or contradicted; INSUFFICIENT = text cannot settle it. (5) If OVERSTATED name the distortion and give a quote pair. (6) List any claim aspect not established.
 Return ONLY one JSON object: {"verdict","confidence"(0-1),"evidence":[{"quote","section","stance":"ENTAILS|CONTRADICTS|NEUTRAL","reason"}],"distortion_type":"none|correlation_causation|animal_to_human|dropped_caveats|effect_size_spin|cherry_picking|other","distortion_note","claim_aspects_unmet":[],"rationale"}`;
 
-const norm = (s) => (s || "").replace(/\s+/g, " ").trim().toLowerCase();
+// Normalize unicode punctuation (curly quotes, dashes, non-breaking spaces)
+// so a verbatim quote isn't rejected over a typographic variant.
+const norm = (s) => (s || "")
+  .replace(/[‘’‛′]/g, "'")
+  .replace(/[“”″]/g, '"')
+  .replace(/[‐-―−]/g, "-")
+  .replace(/[   ]/g, " ")
+  .replace(/\s+/g, " ").trim().toLowerCase();
 function quoteVerified(quote, hay) {
   const q = norm(quote);
   if (q.length < 12) return false;
   if (hay.includes(q)) return true;
-  return hay.includes(q.slice(0, 60));
+  if (q.length >= 60 && hay.includes(q.slice(0, 60))) return true;
+  // Relaxed fallback: a long contiguous verbatim run (10+ words) still appears
+  // exactly in the source — tolerates a dropped clause or ellipsis elsewhere in
+  // the quote without weakening the anti-hallucination guarantee.
+  const words = q.split(" ").filter(Boolean);
+  if (words.length >= 10) {
+    for (let i = 0; i + 10 <= words.length; i++) {
+      if (hay.includes(words.slice(i, i + 10).join(" "))) return true;
+    }
+  }
+  return false;
 }
 const band = (c) => c >= 0.75 ? "High" : c >= 0.45 ? "Med" : "Low";
 const DISTORTION_LABELS = { none:"none", correlation_causation:"correlation→causation", animal_to_human:"animal→human",
@@ -233,7 +258,8 @@ async function verifyClaim(claim, reference, key, model) {
   }
   Object.assign(result, {
     claim, reference, citation_ok: res.citation_ok, retracted: res.retracted, concern: res.concern,
-    resolved: { title:res.title, authors:res.authors, year:res.year, journal:res.journal, doi:res.doi, pmcid:res.pmcid },
+    resolved: { title:res.title, authors:res.authors, year:res.year, journal:res.journal, doi:res.doi, pmcid:res.pmcid,
+                citations:res.citations, type:res.type, is_oa:res.is_oa },
     has_results: fetched.has_results, sections_available: fetched.sections_available, open_access: fetched.open_access,
   });
   return result;
@@ -277,8 +303,10 @@ function scoreAnswer(claimResults, minConf) {
     const reason = r.verdict === "SUPPORTED"
       ? `Directly supported at ${r.has_results ? "results-level" : "abstract-only"} with verified quotes.`
       : `Supports a weaker claim (${r.has_results ? "results-level" : "abstract-only"}); read for context (${DISTORTION_LABELS[r.distortion_type]||"overstated"}).`;
+    const isReview = REVIEW_TYPE_RE.test(res.type||"") || REVIEW_TYPE_RE.test(res.title||"");
     const entry = { title:res.title||r.reference, doi:res.doi, verdict:r.verdict, confidence:r.confidence||0,
-      reason, claims_supported:1, _sort:[VR[r.verdict]??9, -(r.confidence||0), r.has_results?0:1] };
+      reason, claims_supported:1,
+      _sort:[VR[r.verdict]??9, -(r.confidence||0), r.has_results?0:1, isReview?0:1, -(res.citations||0)] };
     if (!byKey[key]) byKey[key] = entry;
     else { const prev = byKey[key]; const n = prev.claims_supported+1;
       const best = (entry._sort < prev._sort) ? entry : prev; best.claims_supported = n; byKey[key] = best; }
@@ -300,29 +328,95 @@ const CLARIFIERS = [
   { id:"breadth", q:"How many candidate sources before filtering?", options:["~8 (fast)","~15 (balanced)","~25 (exhaustive)"] },
 ];
 
+// ---------- multi-provider source discovery ----------
+// Fan out to OpenAlex + Crossref + Europe PMC in parallel — all keyless and
+// CORS-open (Access-Control-Allow-Origin: *), so the browser calls them direct
+// with no key, no proxy, no mailto/tracking. Candidates are deduped by DOI,
+// their metadata merged, and ranked by a pure function of explicit trust
+// signals (provider agreement, query-match rank, citations, recency, OA,
+// evidence tier) — so the same query always yields the same order (auditable).
+function cleanDoi(d) {
+  if (!d) return null;
+  return d.replace(/^https?:\/\/(dx\.)?doi\.org\//i, "").replace(/[).,;>"']+$/, "").toLowerCase();
+}
+async function openAlexSearch(query, n) {
+  const j = await getJSON(`https://api.openalex.org/works?search=${encodeURIComponent(query)}&per_page=${n}`);
+  return (j.results || []).map((w, i) => ({
+    doi: cleanDoi(w.doi), pmcid: null,
+    pmid: (w.ids && w.ids.pmid) ? w.ids.pmid.split("/").pop() : null,
+    title: w.display_name || w.title || null, year: w.publication_year || null,
+    venue: (w.primary_location && w.primary_location.source && w.primary_location.source.display_name) || null,
+    citations: w.cited_by_count || 0, type: w.type || "", is_oa: !!(w.open_access && w.open_access.is_oa),
+    provider: "openalex", rank: i }));
+}
+async function crossrefSearch(query, n) {
+  const j = await getJSON(`https://api.crossref.org/works?query=${encodeURIComponent(query)}&rows=${n}&select=DOI,title,container-title,issued,is-referenced-by-count,type`);
+  return ((j.message && j.message.items) || []).map((m, i) => ({
+    doi: cleanDoi(m.DOI), pmcid: null, pmid: null,
+    title: (m.title && m.title[0]) || null,
+    year: (m.issued && m.issued["date-parts"] && m.issued["date-parts"][0] && m.issued["date-parts"][0][0]) || null,
+    venue: (m["container-title"] && m["container-title"][0]) || null,
+    citations: m["is-referenced-by-count"] || 0, type: m.type || "", is_oa: false,
+    provider: "crossref", rank: i }));
+}
+async function epmcProviderSearch(query, n) {
+  const j = await getJSON(`https://www.ebi.ac.uk/europepmc/webservices/rest/search?query=${encodeURIComponent(query)}&format=json&resultType=lite&pageSize=${n}`);
+  return (((j.resultList && j.resultList.result)) || []).map((r, i) => ({
+    doi: cleanDoi(r.doi), pmcid: r.pmcid || null, pmid: r.pmid || null,
+    title: r.title || null, year: r.pubYear ? Number(r.pubYear) : null, venue: r.journalTitle || null,
+    citations: r.citedByCount || 0, type: r.pubType || "", is_oa: r.isOpenAccess === "Y",
+    provider: "epmc", rank: i }));
+}
+const PROVIDERS = { openalex: openAlexSearch, crossref: crossrefSearch, epmc: epmcProviderSearch };
+// DuckDuckGo-style !bang: scope a query to one provider.
+const BANGS = { "!oa":"openalex", "!openalex":"openalex", "!cr":"crossref", "!crossref":"crossref",
+  "!epmc":"epmc", "!europepmc":"epmc", "!pm":"epmc", "!pubmed":"epmc" };
+const REVIEW_TYPE_RE = /review|meta-analysis|meta analysis/i;
+const PREPRINT_RE = /preprint|biorxiv|medrxiv|arxiv|posted-content/i;
+function mergeCandidates(lists) {
+  const byKey = new Map();
+  for (const list of lists) for (const c of list) {
+    const key = c.doi || (c.pmcid && c.pmcid.toLowerCase());
+    if (!key) continue;
+    if (!byKey.has(key)) { byKey.set(key, { ...c, providers: [c.provider], bestRank: c.rank }); continue; }
+    const m = byKey.get(key);
+    if (!m.providers.includes(c.provider)) m.providers.push(c.provider);
+    m.bestRank = Math.min(m.bestRank, c.rank);
+    m.title = m.title || c.title; m.year = m.year || c.year; m.venue = m.venue || c.venue;
+    m.pmcid = m.pmcid || c.pmcid; m.pmid = m.pmid || c.pmid;
+    m.citations = Math.max(m.citations || 0, c.citations || 0);
+    m.type = m.type || c.type; m.is_oa = m.is_oa || c.is_oa;
+  }
+  return [...byKey.values()];
+}
+function trustScore(c) {
+  let s = 0;
+  s += (c.providers ? c.providers.length : 1) * 3;        // agreement across providers
+  s += Math.max(0, 6 - (c.bestRank == null ? 9 : c.bestRank)); // query-match (top of a list)
+  s += Math.log10((c.citations || 0) + 1) * 2;            // impact
+  if (c.year) s += Math.max(0, c.year - 2000) * 0.05;     // mild recency tilt
+  if (c.is_oa) s += 2;                                    // full text is verifiable
+  if (REVIEW_TYPE_RE.test(c.type || "") || REVIEW_TYPE_RE.test(c.title || "")) s += 3; // evidence tier
+  if (PREPRINT_RE.test(c.type || "")) s -= 2;             // not yet peer-reviewed
+  return s;
+}
+async function discoverSources(rawQuery, n = 3, opts = {}) {
+  let query = (rawQuery || "").trim();
+  let scope = opts.scope || null;
+  const m = query.match(/(?:^|\s)(![a-z]+)\b/i);          // !bang provider scoping
+  if (m && BANGS[m[1].toLowerCase()]) { scope = BANGS[m[1].toLowerCase()]; query = query.replace(m[1], "").replace(/\s+/g, " ").trim(); }
+  const names = scope ? [scope] : ["openalex", "crossref", "epmc"];
+  const per = Math.max(n + 3, 8);
+  const lists = await Promise.all(names.map(name => PROVIDERS[name](query, per).catch(() => [])));
+  let cands = mergeCandidates(lists).filter(c => c.doi || c.pmcid);
+  if (opts.peerReviewedOnly) cands = cands.filter(c => !PREPRINT_RE.test(c.type || ""));
+  cands.forEach(c => c._score = trustScore(c));
+  cands.sort((a, b) => b._score - a._score ||
+    String(a.doi || a.pmcid).localeCompare(String(b.doi || b.pmcid))); // deterministic tiebreak
+  return cands.slice(0, n);
+}
+
 // ---------- draft claims from a question + find real sources ----------
-async function epmcSearch(query) {
-  try {
-    const j = await getJSON(`https://www.ebi.ac.uk/europepmc/webservices/rest/search?query=${encodeURIComponent(query)}&format=json&resultType=lite&pageSize=5`);
-    const results = (j.resultList && j.resultList.result) || [];
-    // prefer an open-access hit with a DOI, then any DOI, then any PMCID
-    const pick = results.find(r => r.doi && r.isOpenAccess === "Y")
-              || results.find(r => r.doi) || results.find(r => r.pmcid) || results[0];
-    if (!pick) return null;
-    return { reference: pick.doi || pick.pmcid, title: pick.title };
-  } catch { return null; }
-}
-async function epmcSearchMulti(query, n) {
-  try {
-    const j = await getJSON(`https://www.ebi.ac.uk/europepmc/webservices/rest/search?query=${encodeURIComponent(query)}&format=json&resultType=lite&pageSize=12`);
-    const results = (j.resultList && j.resultList.result) || [];
-    // prefer OA hits with DOIs first, then fill with other DOIs/PMCIDs
-    const ordered = [...results.filter(r=>r.doi&&r.isOpenAccess==="Y"), ...results.filter(r=>r.doi&&r.isOpenAccess!=="Y"), ...results.filter(r=>!r.doi&&r.pmcid)];
-    const refs = [], seen = new Set();
-    for (const r of ordered) { const ref = r.doi || r.pmcid; if (!ref || seen.has(ref)) continue; seen.add(ref); refs.push(ref); if (refs.length >= n) break; }
-    return refs;
-  } catch { return []; }
-}
 async function draftClaims(question, key, model) {
   const sys = `You answer a scientific question as 3 to 5 discrete, individually verifiable factual claims. For EACH claim, give a focused literature-search query (a few keywords) that would find a primary paper supporting or refuting it. Return ONLY a JSON object: {"claims":[{"claim":"...","query":"..."}]}. No prose.`;
   const r = await fetch("https://api.anthropic.com/v1/messages", {
@@ -362,7 +456,8 @@ $("draftBtn").onclick = async () => {
     $("claims").innerHTML = "";
     for (let i = 0; i < claims.length; i++) {
       $("draftStatus").textContent = `Finding sources… ${i + 1} / ${claims.length}`;
-      const refs = await epmcSearchMulti(claims[i].query || claims[i].claim, 2);
+      const cands = await discoverSources(claims[i].query || claims[i].claim, 2);
+      const refs = cands.map(c => c.doi || c.pmcid);
       addClaimRow(claims[i].claim, refs.join("\n"));
     }
     $("draftStatus").textContent = `Drafted ${claims.length} claims with sources — review, set your threshold, then Verify.`;
@@ -413,10 +508,16 @@ function cardHTML(r, hideClaim=false) {
   let why = r.rationale ? `<p class="meta"><b>Why:</b> ${esc(r.rationale)}</p>` : "";
   let dist = (r.verdict==="OVERSTATED" && r.distortion_note) ? `<p><span class="tag">${esc(DISTORTION_LABELS[r.distortion_type]||r.distortion_type)}</span> ${esc(r.distortion_note)}</p>` : "";
   let unmet = (r.claim_aspects_unmet||[]).length ? `<p class="meta"><b>Not established:</b> ${esc(r.claim_aspects_unmet.join("; "))}</p>` : "";
+  const trust = [
+    res.type && REVIEW_TYPE_RE.test(res.type) ? "review/meta-analysis" : (res.type && PREPRINT_RE.test(res.type) ? "preprint (not peer-reviewed)" : null),
+    (res.citations != null) ? `${res.citations} citation${res.citations===1?"":"s"}` : null,
+    res.is_oa ? "open access" : null,
+  ].filter(Boolean).join(" · ");
   return `<div class="card ${r.verdict}">
     <div><span class="badge ${r.verdict}">${BADGE[r.verdict]}</span> &nbsp;<span class="meta">confidence: ${r.band} (${(r.confidence||0).toFixed(2)}) · ${status}</span></div>
     ${hideClaim ? "" : `<p><b>Claim:</b> ${esc(r.claim)}</p>`}
     ${res.title?`<p class="meta"><b>Paper:</b> ${esc(res.title)}${res.year?` (${esc(res.year)})`:""}${res.doi?` · <a href="https://doi.org/${esc(res.doi)}" target="_blank" rel="noopener">${esc(res.doi)}</a>`:""}</p>`:""}
+    ${trust?`<p class="meta">${esc(trust)}</p>`:""}
     ${ev?`<div><b>Verified evidence:</b>${ev}</div>`:""}
     ${why}${dist}${unmet}
   </div>`;

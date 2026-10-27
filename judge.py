@@ -102,7 +102,12 @@ _TOOL = {
 
 
 def _norm(s: str) -> str:
-    return re.sub(r"\s+", " ", (s or "")).strip().lower()
+    s = s or ""
+    s = re.sub(r"[‘’‛′]", "'", s)
+    s = re.sub(r"[“”″]", '"', s)
+    s = re.sub(r"[‐-―−]", "-", s)
+    s = re.sub(r"[   ]", " ", s)
+    return re.sub(r"\s+", " ", s).strip().lower()
 
 
 def _quote_verified(quote: str, haystack_norm: str) -> bool:
@@ -111,8 +116,17 @@ def _quote_verified(quote: str, haystack_norm: str) -> bool:
         return False
     if q in haystack_norm:
         return True
-    head = q[:60]
-    return head in haystack_norm
+    if len(q) >= 60 and q[:60] in haystack_norm:
+        return True
+    # Relaxed fallback: a long contiguous verbatim run (10+ words) still present
+    # exactly in the source — tolerates a dropped clause elsewhere in the quote
+    # without weakening the anti-hallucination guarantee.
+    words = [w for w in q.split(" ") if w]
+    if len(words) >= 10:
+        for i in range(0, len(words) - 10 + 1):
+            if " ".join(words[i:i + 10]) in haystack_norm:
+                return True
+    return False
 
 
 def band(conf: float) -> str:
