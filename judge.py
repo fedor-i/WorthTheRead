@@ -178,6 +178,66 @@ def sampling_system() -> str:
     return _SYSTEM + _JSON_INSTRUCTIONS
 
 
+# --- the revise step of the self-improvement loop --------------------------
+
+_REVISE_SYSTEM = (
+    "You tighten a scientific CLAIM so that every part of it is directly "
+    "supported by the cited paper(s). Using ONLY the verified findings "
+    "provided, rewrite the claim to remove or correct anything the papers do "
+    "not establish — an unsupported magnitude, the wrong or over-broad "
+    "population, an unsupported direction, causal language the evidence doesn't "
+    "justify, or any over-generalized scope. Stay specific and faithful; do not "
+    "introduce new assertions and do not weaken it beyond what the evidence "
+    "requires. Return ONLY the rewritten claim as one plain sentence — no "
+    "preamble, no quotation marks."
+)
+
+
+def revise_system() -> str:
+    return _REVISE_SYSTEM
+
+
+def build_revise_user(claim: str, result: dict) -> str:
+    res = result.get("resolved", {}) or {}
+    quotes = []
+    for a in result.get("aspects", []) or []:
+        if a.get("quote"):
+            quotes.append(f"• [{a.get('status')} {a.get('type')}] “{a['quote']}”")
+    for e in result.get("evidence", []) or []:
+        if e.get("quote"):
+            quotes.append(f"• “{e['quote']}”")
+    unmet = "; ".join(result.get("claim_aspects_unmet", []) or [])
+    dist = result.get("distortion_note") or ""
+    findings = (f"PAPER: {res.get('title') or result.get('reference')} — "
+                f"verdict {result.get('verdict')}."
+                + (f" Distortion: {dist}" if dist else "") + "\n"
+                + "Verified from the text:\n"
+                + ("\n".join(quotes[:6]) or "(none)")
+                + f"\nNot established by the text: {unmet or '(none)'}")
+    return (f"CLAIM:\n{claim}\n\nVERIFIED FINDINGS FROM THE CITED PAPER(S):\n"
+            f"{findings}\n\nRewrite the claim so it is fully supported by these "
+            "findings.")
+
+
+def _clean_revision(text: str) -> str:
+    text = (text or "").strip()
+    text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
+    text = re.sub(r"\n?```$", "", text)
+    return text.strip().strip('"').strip("“”").strip()
+
+
+def revise_claim_api(claim: str, result: dict) -> str:
+    """Propose a tightened claim via the api/bedrock backend."""
+    client, model = _client_and_model()
+    msg = client.messages.create(
+        model=model, max_tokens=400, system=_REVISE_SYSTEM,
+        messages=[{"role": "user", "content": build_revise_user(claim, result)}],
+    )
+    text = "".join(getattr(b, "text", "") for b in msg.content
+                   if getattr(b, "type", None) == "text")
+    return _clean_revision(text)
+
+
 # --- shared result assembly + the quote-verification guard ------------------
 
 def no_text_result(reason: str = "No paper text could be retrieved.") -> dict:

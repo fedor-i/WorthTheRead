@@ -331,6 +331,136 @@ async function verifyClaim(claim, reference, key, model) {
   return result;
 }
 
+// ---------- the verify → revise loop (claims self-improve) ----------
+// Given a claim and how its cited paper(s) actually verified, rewrite the claim
+// so every part is supported by the quoted evidence — dropping/correcting any
+// unsupported magnitude, population, direction, or causal scope. Returns the
+// tightened claim text, or null if no key / no change.
+async function reviseClaim(claim, refResults, key, model) {
+  if (!key) return null;
+  const findings = refResults.map(r => {
+    const res = r.resolved || {};
+    const quotes = (r.aspects || []).filter(a => a.quote)
+      .map(a => `• [${a.status} ${a.type}] “${a.quote}”`)
+      .concat((r.evidence || []).map(e => `• “${e.quote}”`)).slice(0, 6).join("\n");
+    const unmet = (r.claim_aspects_unmet || []).join("; ");
+    const dist = r.distortion_note ? ` Distortion: ${r.distortion_note}` : "";
+    return `PAPER: ${res.title || r.reference} — verdict ${r.verdict}.${dist}\n`
+      + `Verified from the text:\n${quotes || "(none)"}\nNot established by the text: ${unmet || "(none)"}`;
+  }).join("\n\n");
+  const sys = `You tighten a scientific CLAIM so that every part of it is directly supported by the cited paper(s). Using ONLY the verified findings provided, rewrite the claim to remove or correct anything the papers do not establish — an unsupported magnitude, the wrong or over-broad population, an unsupported direction, causal language the evidence doesn't justify, or any over-generalized scope. Stay specific and faithful; do not introduce new assertions and do not weaken it beyond what the evidence requires. Return ONLY the rewritten claim as one plain sentence — no preamble, no quotation marks.`;
+  const user = `CLAIM:\n${claim}\n\nVERIFIED FINDINGS FROM THE CITED PAPER(S):\n${findings}\n\nRewrite the claim so it is fully supported by these findings.`;
+  try {
+    const r = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type":"application/json", "x-api-key":key, "anthropic-version":"2023-06-01", "anthropic-dangerous-direct-browser-access":"true" },
+      body: JSON.stringify({ model, max_tokens: 400, system: sys, messages: [{ role:"user", content: user }] }),
+    });
+    if (!r.ok) return null;
+    const j = await r.json();
+    let text = (j.content || []).filter(b => b.type === "text").map(b => b.text).join(" ").trim();
+    text = text.replace(/^```[a-zA-Z]*\n?/, "").replace(/\n?```$/, "");
+    text = text.replace(/^["'“”]+|["'“”]+$/g, "").replace(/\s+/g, " ").trim();
+    return text || null;
+  } catch { return null; }
+}
+
+// Broaden step: discover papers the claim doesn't already cite, verify the
+// claim against them, and keep the substantive results — aiming to add `want`
+// NEW *supporting* sources. Uses multi-provider discovery (OpenAlex + Crossref
+// + Europe PMC). Returns the newly verified ref-results (marked discovered).
+async function strengthenClaim(claim, refResults, key, model, want, status) {
+  const have = new Set();
+  for (const r of refResults) {
+    const res = r.resolved || {};
+    if (res.doi) have.add(res.doi.toLowerCase());
+    if (res.pmcid) have.add(res.pmcid.toLowerCase());
+  }
+  let cands = [];
+  try { cands = await discoverSources(claim, want + have.size + 6); } catch { return []; }
+  const fresh = [];
+  for (const c of cands) {
+    const k = (c.doi || c.pmcid || "").toLowerCase();
+    if (!k || have.has(k)) continue;
+    have.add(k); fresh.push(c.doi || c.pmcid);
+  }
+  const out = []; let supporting = 0;
+  for (const ref of fresh) {
+    if (supporting >= want || out.length >= want + 4) break;   // stop once we have enough / cap tries
+    if (status) status();
+    let r;
+    try { r = { ...(await verifyClaim(claim, ref, key, model)), discovered: true }; }
+    catch { continue; }
+    if (r.verdict === "INSUFFICIENT") continue;                // no retrievable text -> skip as noise
+    out.push(r);
+    if (r.verdict === "SUPPORTED") supporting++;
+  }
+  return out;
+}
+
+// The self-improvement loop for one claim. For EVERY claim it (b) discovers
+// `want` (2-3) corroborating papers and verifies the claim against them, and
+// (a) rewrites an OVERSTATED/UNSUPPORTED claim to match the evidence — looping
+// until the claim is supported by enough independent sources, or rounds run out.
+async function verifyRowWithLoop(row, key, model, maxRounds, opts, status) {
+  const { revise = true, broaden = true, want = 2 } = opts || {};
+  let claim = row.claim;
+  const trail = [];
+  const addedRefs = [];
+  let refResults = [];
+  for (const ref of row.refs) {
+    if (status) status(0, "verifying");
+    try { refResults.push(await verifyClaim(claim, ref, key, model)); }
+    catch (e) { refResults.push({ ...noTextResult(`Error: ${e.message}`), claim, reference:ref, resolved:{} }); }
+  }
+  const discoveredSupporting = () =>
+    refResults.filter(r => r.discovered && r.verdict === "SUPPORTED").length;
+
+  for (let round = 0; round <= maxRounds; round++) {
+    const agg = aggregateClaim(claim, refResults);
+    trail.push({ claim, verdict: agg.verdict, strength: agg.strength,
+                 support_count: agg.support_count, total_refs: agg.total_refs });
+    const needRevise = revise && (agg.verdict === "OVERSTATED" || agg.verdict === "UNSUPPORTED");
+    const needBroaden = broaden && discoveredSupporting() < want;   // every claim seeks `want` corroborating sources
+    if ((!needRevise && !needBroaden) || round >= maxRounds || !key) break;
+    let changed = false;
+
+    // (a) revise an overstated / unsupported claim, then re-verify current refs.
+    if (needRevise) {
+      if (status) status(round, "revising the claim");
+      const revised = await reviseClaim(claim, refResults, key, model);
+      if (revised && norm(revised) !== norm(claim)) {
+        claim = revised;
+        const re = [];
+        for (const r of refResults) {
+          try { re.push({ ...(await verifyClaim(claim, r.reference, key, model)), discovered: r.discovered }); }
+          catch { re.push(r); }
+        }
+        refResults = re; changed = true;
+      }
+    }
+
+    // (b) broaden: find corroborating papers (for every claim, until `want` support it).
+    if (needBroaden) {
+      if (status) status(round, "finding corroborating sources");
+      const fresh = await strengthenClaim(claim, refResults, key, model,
+                                          want - discoveredSupporting(), () => status && status(round, "finding corroborating sources"));
+      if (fresh.length) {
+        refResults = refResults.concat(fresh);
+        for (const f of fresh) addedRefs.push(f.reference);
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
+  const agg = aggregateClaim(claim, refResults);
+  agg.revisions = trail;
+  agg.original_claim = row.claim;
+  agg.revised = norm(claim) !== norm(row.claim);
+  agg.added_refs = addedRefs;
+  return agg;
+}
+
 // ---------- score + worth-your-read ----------
 const VW = { SUPPORTED:1.0, OVERSTATED:0.4, INSUFFICIENT:0, UNSUPPORTED:0 };
 const VR = { SUPPORTED:0, OVERSTATED:1, INSUFFICIENT:2, UNSUPPORTED:3 };
@@ -569,7 +699,7 @@ function buildPlan() {
 function cardHTML(r, hideClaim=false) {
   const BADGE = { SUPPORTED:"✓ SUPPORTED", OVERSTATED:"⚠ OVERSTATED", UNSUPPORTED:"✗ UNSUPPORTED", INSUFFICIENT:"— INSUFFICIENT EVIDENCE" };
   const res = r.resolved || {};
-  const status = [ r.citation_ok?"link ✓":"link ⚠", r.retracted?"<b>RETRACTED</b>":(r.concern?"concern":""), r.has_results?"full text ✓":"abstract only ⚠" ].filter(Boolean).join(" · ");
+  const status = [ r.discovered?"🔎 found by loop":"", r.citation_ok?"link ✓":"link ⚠", r.retracted?"<b>RETRACTED</b>":(r.concern?"concern":""), r.has_results?"full text ✓":"abstract only ⚠" ].filter(Boolean).join(" · ");
   const ASPECT_ICON = { ENTAILED:"✓", CONTRADICTED:"✗", ABSENT:"—" };
   const asps = r.aspects || [];
   let asp = asps.length ? `<div class="aspects"><div class="meta"><b>Claim breakdown</b> — each piece checked separately:</div>`
@@ -598,9 +728,28 @@ function cardHTML(r, hideClaim=false) {
 function claimCardHTML(cr) {
   const BADGE = { SUPPORTED:"✓ SUPPORTED", OVERSTATED:"⚠ OVERSTATED", UNSUPPORTED:"✗ UNSUPPORTED", INSUFFICIENT:"— INSUFFICIENT EVIDENCE" };
   const rec = cr.recommendation ? `<p class="meta" style="color:var(--amber-fg)">⚠ ${esc(cr.recommendation)}</p>` : "";
+  const nAdded = (cr.added_refs || []).length;
+  const tags = [
+    cr.revised ? `<span class="tag">auto-revised</span>` : "",
+    nAdded ? `<span class="tag">+${nAdded} corroborating source${nAdded===1?"":"s"} found</span>` : "",
+  ].filter(Boolean).join(" ");
+  const tagStr = tags ? ` · ${tags}` : "";
+  // Show the trail when the claim text changed OR support grew over the rounds.
+  const rv = cr.revisions || [];
+  const showTrail = rv.length > 1 && (cr.revised || rv.some(s => s.support_count !== rv[0].support_count || s.total_refs !== rv[0].total_refs));
+  let trail = "";
+  if (showTrail) {
+    trail = `<div class="revtrail"><div class="meta"><b>Self-improvement loop:</b></div>`
+      + rv.map((s, i) => `${i > 0 ? `<div class="revarrow">↓ ${cr.revised && norm(s.claim) !== norm(rv[i-1].claim) ? "revised claim" : "added sources"}</div>` : ""}`
+          + `<div class="revstep ${i === rv.length - 1 ? "final" : ""}">`
+          + `<span class="badge ${s.verdict}" style="font-size:.68rem">${BADGE[s.verdict]}</span> `
+          + `<span class="meta">${s.support_count}/${s.total_refs} supporting · ${esc(s.strength)}</span><br>${esc(s.claim)}</div>`).join("")
+      + `</div>`;
+  }
   return `<div class="card ${cr.verdict}">
-    <div><span class="badge ${cr.verdict}">${BADGE[cr.verdict]}</span> &nbsp;<span class="meta">supported by <b>${cr.support_count} of ${cr.total_refs}</b> reference(s) · strength: <b>${cr.strength}</b></span></div>
+    <div><span class="badge ${cr.verdict}">${BADGE[cr.verdict]}</span> &nbsp;<span class="meta">supported by <b>${cr.support_count} of ${cr.total_refs}</b> reference(s) · strength: <b>${cr.strength}</b>${tagStr}</span></div>
     <p><b>Claim:</b> ${esc(cr.claim)}</p>
+    ${trail}
     ${rec}
     <div style="margin-left:12px; border-left:2px solid var(--line); padding-left:12px;">${cr.refResults.map(r => cardHTML(r, true)).join("")}</div>
   </div>`;
@@ -618,22 +767,29 @@ function scorecardHTML(s) {
 $("verifyBtn").onclick = async () => {
   const key = $("key").value.trim(), model = $("model").value.trim() || "claude-sonnet-5-5";
   const minConf = Number($("minconf").value);
+  const autoRevise = $("autoRevise").checked;
+  const autoBroaden = $("autoBroaden").checked;
+  const loopOn = autoRevise || autoBroaden;
+  const maxRounds = loopOn ? Math.max(1, Math.min(4, Number($("maxRounds").value) || 2)) : 0;
   const rows = [...$("claims").querySelectorAll(".claim-row")].map(d => ({
+    el: d,
     claim: d.querySelector(".c-claim").value.trim(),
     refs: d.querySelector(".c-ref").value.split(/[\n,]+/).map(s => s.trim()).filter(Boolean) }))
     .filter(x => x.claim && x.refs.length);
   if (!rows.length) { $("results").innerHTML = `<div class="err">Add at least one claim with a reference.</div>`; return; }
+  if (loopOn && !key) { $("results").innerHTML = `<div class="err">Auto-revise / find-sources needs your Anthropic key (it rewrites claims and judges newly found papers). Add it above, or uncheck both.</div>`; return; }
   $("verifyBtn").disabled = true; $("results").innerHTML = "";
+  const opts = { revise: autoRevise, broaden: autoBroaden, want: 2 };
   const claimResults = [];
-  const total = rows.reduce((n, r) => n + r.refs.length, 0); let done = 0;
-  for (const row of rows) {
-    const refResults = [];
-    for (const ref of row.refs) {
-      done++; $("status").textContent = `Verifying ${done} / ${total}…`;
-      try { refResults.push(await verifyClaim(row.claim, ref, key, model)); }
-      catch (e) { refResults.push({ ...noTextResult(`Error: ${e.message}`), claim:row.claim, reference:ref, resolved:{} }); }
-    }
-    claimResults.push(aggregateClaim(row.claim, refResults));
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    const cr = await verifyRowWithLoop(row, key, model, maxRounds, opts,
+      (round, phase) => { $("status").textContent =
+        `Claim ${i + 1} / ${rows.length} — ${phase || "verifying"}${round > 0 ? ` (round ${round})` : ""}…`; });
+    // Write the final (possibly tightened) claim back into the editor so the
+    // claims the user keeps are the improved ones.
+    if (cr.revised && row.el) row.el.querySelector(".c-claim").value = cr.claim;
+    claimResults.push(cr);
     $("results").innerHTML = claimResults.map(claimCardHTML).join("");
   }
   $("status").textContent = "";

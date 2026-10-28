@@ -148,6 +148,68 @@ async def score_answer(claims: list, min_confidence: float = 0.0,
     return summary
 
 
+async def _run_revise(ctx, claim: str, result: dict):
+    """Propose a tightened claim: host sampling first, then api/bedrock."""
+    if ctx is not None:
+        try:
+            from mcp.types import SamplingMessage, TextContent
+            res = await ctx.session.create_message(
+                messages=[SamplingMessage(
+                    role="user",
+                    content=TextContent(type="text",
+                                        text=_judge.build_revise_user(claim, result)))],
+                system_prompt=_judge.revise_system(),
+                max_tokens=400,
+            )
+            text = getattr(res.content, "text", "") or ""
+            if text.strip():
+                return _judge._clean_revision(text)
+        except Exception:
+            pass
+    try:
+        return _judge.revise_claim_api(claim, result)
+    except Exception:
+        return None
+
+
+@mcp.tool()
+async def revise_claim(claim: str, reference: str, expected_title: str = "",
+                       max_rounds: int = 2, ctx: Context = None) -> dict:
+    """Verify a claim and, if it is OVERSTATED or UNSUPPORTED, rewrite it to
+    match what the cited paper actually establishes and re-verify — the
+    self-improvement loop, run to convergence (up to max_rounds).
+
+    Returns the final (possibly tightened) claim, its verdict, the full
+    revision trail, and the final verdict card. SUPPORTED or INSUFFICIENT
+    claims are returned unchanged (rewording can't help when the text simply
+    doesn't address the claim).
+    """
+    trail = []
+    current = claim
+    verification = None
+    for round_i in range(max(0, max_rounds) + 1):
+        verification = await _verify(current, reference, expected_title, ctx)
+        trail.append({"claim": current, "verdict": verification["verdict"],
+                      "confidence": verification.get("confidence")})
+        if verification["verdict"] in ("SUPPORTED", "INSUFFICIENT") \
+                or round_i >= max_rounds:
+            break
+        revised = await _run_revise(ctx, current, verification)
+        if not revised or revised.strip() == current.strip():
+            break
+        current = revised
+    return {
+        "revised": len(trail) > 1,
+        "original_claim": claim,
+        "claim": current,
+        "verdict": verification["verdict"],
+        "confidence": verification.get("confidence"),
+        "revisions": trail,
+        "verification": verification,
+        "card": verification.get("card"),
+    }
+
+
 @mcp.tool()
 def plan_search(question: str, answers: dict = None) -> dict:
     """Clarify-then-optimize a research question before verifying.

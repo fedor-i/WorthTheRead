@@ -82,6 +82,10 @@
   .achip.CONTRADICTED { background:var(--red-bg); color:var(--red-fg); }
   .achip.ABSENT { background:var(--grey-bg); color:var(--grey-fg); }
   .aspect blockquote { margin:.3em 0 0; font-size:.9rem; }
+  .revtrail { margin:.5em 0; padding:10px 12px; background:var(--bg); border:1px dashed var(--line); border-radius:8px; }
+  .revstep { margin:.3em 0; font-size:.92rem; }
+  .revstep.final { font-weight:600; }
+  .revarrow { color:var(--muted); font-size:.78rem; margin:.2em 0; }
 </style>
 </head>
 <body>
@@ -124,6 +128,13 @@
     <input type="range" id="minconf" min="0" max="1" step="0.05" value="0.5">
     <span id="minconfVal">0.50</span>
   </div>
+  <div class="row" style="align-items:center; gap:16px; margin:.5em 0 .2em">
+    <label style="margin:0; font-weight:600; flex:0 0 auto"><input type="checkbox" id="autoRevise" checked> Auto-revise overstated claims</label>
+    <label style="margin:0; font-weight:600; flex:0 0 auto"><input type="checkbox" id="autoBroaden" checked> Find corroborating sources</label>
+    <label style="margin:0; font-weight:normal; color:var(--muted); flex:0 0 auto">max rounds
+      <input type="number" id="maxRounds" value="2" min="1" max="4" style="width:58px; display:inline-block; padding:4px 6px"></label>
+  </div>
+  <p class="hint">The self-improvement loop runs on <b>every</b> claim: it searches OpenAlex + Crossref + Europe PMC for <b>2 more corroborating papers</b> and verifies the claim against each, and (if the claim is OVERSTATED/UNSUPPORTED) rewrites it to match the evidence — re-verifying until the claim is supported by enough independent sources, or rounds run out. Found papers are marked “🔎 found by loop” and feed the Worth-your-read list; tightened claims replace the originals above. (Needs your key; more rounds = more API calls.)</p>
   <button id="verifyBtn">Verify claims</button>
   <div id="status" class="spin"></div>
   <div id="results"></div>
