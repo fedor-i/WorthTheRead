@@ -46,6 +46,18 @@ and drop `WYR_USE_BEDROCK`.
   `{claim, reference}`. Verifies each, then returns an overall confidence score
   and a ranked **"worth your read"** source list; `min_confidence` screens out
   sources below your bar.
+- **`find_sources(query, limit=3, scope="", peer_reviewed_only=False)`** —
+  discover real papers for a query across OpenAlex, Crossref & Europe PMC in
+  parallel, deduped by DOI and trust-ranked (provider agreement, query-match
+  rank, citations, recency, open access, evidence tier). A leading `!bang`
+  (`!oa` / `!crossref` / `!epmc` / `!pubmed`) scopes it to one provider.
+- **`revise_claim(claim, reference, max_rounds=2, broaden=True, want=2)`** —
+  the self-improvement loop. Verifies the claim, then each round **revises** it
+  (if OVERSTATED/UNSUPPORTED) to match the evidence and **broadens** it by
+  discovering up to `want` corroborating papers not already cited — re-verifying
+  until the claim is supported by enough independent sources or `max_rounds` is
+  hit. Returns the final claim, aggregate verdict + strength, the revision
+  trail, and every reference's verdict (discovered ones flagged).
 - **`plan_search(question, answers=None)`** — clarify-then-optimize: returns
   clarifying questions, then (with answers) an optimized search plan.
 
@@ -53,6 +65,7 @@ and drop `WYR_USE_BEDROCK`.
 
 | Stage | Source |
 | --- | --- |
+| Discover sources | OpenAlex + Crossref + Europe PMC (parallel, keyless), deduped by DOI + trust-ranked |
 | Resolve link + retraction check | Crossref (`updated-by` field) + NCBI ID Converter |
 | Fetch real results | PMC BioC JSON (section-tagged); Europe PMC abstract fallback |
 | Judge | Claude (forced structured output) |

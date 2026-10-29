@@ -24,6 +24,7 @@ from . import judge as _judge
 from . import score as _score
 from . import render as _render
 from . import plan as _plan
+from . import discover as _discover
 
 mcp = FastMCP("worth-your-read")
 
@@ -172,41 +173,194 @@ async def _run_revise(ctx, claim: str, result: dict):
         return None
 
 
+def _aggregate(results: list) -> dict:
+    """Roll a claim's per-reference verdicts into one, the way the site does:
+    SUPPORTED wins if any source supports it; strength grows with the number of
+    independent supporting sources."""
+    sup = [r for r in results if r["verdict"] == "SUPPORTED"]
+    over = [r for r in results if r["verdict"] == "OVERSTATED"]
+    unsup = [r for r in results if r["verdict"] == "UNSUPPORTED"]
+    verdict = ("SUPPORTED" if sup else "OVERSTATED" if over
+               else "UNSUPPORTED" if unsup else "INSUFFICIENT")
+    support_count = len(sup)
+    strength = ("Strong" if support_count >= 2
+                else "Limited" if support_count == 1 else "None")
+    confidence = (max((r.get("confidence") or 0) for r in sup) if sup
+                  else max((r.get("confidence") or 0) for r in results)
+                  if results else 0.0)
+    return {"verdict": verdict, "support_count": support_count,
+            "total_refs": len(results), "strength": strength,
+            "confidence": confidence}
+
+
+def _worst_result(results: list) -> dict:
+    """The result a revision should target: an OVERSTATED one first, then
+    UNSUPPORTED, else the primary reference."""
+    for want in ("OVERSTATED", "UNSUPPORTED"):
+        for r in results:
+            if r["verdict"] == want:
+                return r
+    return results[0]
+
+
+def _cited_keys(results: list) -> set:
+    keys = set()
+    for r in results:
+        res = r.get("resolved") or {}
+        if res.get("doi"):
+            keys.add(res["doi"].lower())
+        if res.get("pmcid"):
+            keys.add(res["pmcid"].lower())
+    return keys
+
+
+async def _strengthen(claim: str, existing: list, want: int, ctx) -> list:
+    """Discover corroborating papers not already cited and verify the claim
+    against them, keeping going until `want` of them SUPPORT the claim (or the
+    candidate pool is exhausted). Mirrors the site's strengthenClaim."""
+    have = _cited_keys(existing)
+    cands = _discover.discover_sources(claim, n=want + len(have) + 6)
+    out, supported = [], 0
+    for c in cands:
+        ref = c.get("doi") or c.get("pmcid")
+        if not ref:
+            continue
+        if (c.get("doi") or "").lower() in have \
+                or (c.get("pmcid") or "").lower() in have:
+            continue
+        v = await _verify(claim, ref, c.get("title") or "", ctx)
+        v["discovered"] = True
+        if v["verdict"] == "INSUFFICIENT":
+            continue  # couldn't fetch/judge it — don't count or clutter
+        out.append(v)
+        if v["verdict"] == "SUPPORTED":
+            supported += 1
+        if supported >= want or len(out) >= want + 4:
+            break
+    return out
+
+
+@mcp.tool()
+def find_sources(query: str, limit: int = 3, scope: str = "",
+                 peer_reviewed_only: bool = False,
+                 ctx: Context = None) -> dict:
+    """Discover real papers for a query across OpenAlex, Crossref & Europe PMC.
+
+    Fans out to all three (keyless), dedupes by DOI, and trust-ranks the
+    candidates by a pure function of explicit signals — provider agreement,
+    query-match rank, citations, recency, open access, and evidence tier — so
+    the same query always yields the same order. Feed the returned DOIs into
+    verify_claim / score_answer, or let revise_claim pull them automatically.
+
+    Args:
+        query: a few keywords describing the claim or topic. A leading !bang
+            scopes it to one provider: !oa, !crossref, !epmc, !pubmed.
+        limit: how many ranked candidates to return.
+        scope: force a single provider ("openalex" / "crossref" / "epmc").
+        peer_reviewed_only: drop preprints (bioRxiv/medRxiv/arXiv).
+    """
+    cands = _discover.discover_sources(
+        query, n=max(1, limit), scope=(scope or None),
+        peer_reviewed_only=peer_reviewed_only)
+    sources = [{
+        "doi": c.get("doi"), "pmcid": c.get("pmcid"), "pmid": c.get("pmid"),
+        "title": c.get("title"), "year": c.get("year"), "venue": c.get("venue"),
+        "citations": c.get("citations"), "providers": c.get("providers"),
+        "open_access": c.get("is_oa"), "trust_score": round(c.get("_score", 0), 2),
+    } for c in cands]
+    return {"query": query, "count": len(sources), "sources": sources}
+
+
 @mcp.tool()
 async def revise_claim(claim: str, reference: str, expected_title: str = "",
-                       max_rounds: int = 2, ctx: Context = None) -> dict:
-    """Verify a claim and, if it is OVERSTATED or UNSUPPORTED, rewrite it to
-    match what the cited paper actually establishes and re-verify — the
-    self-improvement loop, run to convergence (up to max_rounds).
+                       max_rounds: int = 2, broaden: bool = True,
+                       want: int = 2, ctx: Context = None) -> dict:
+    """Verify a claim and run the self-improvement loop on it to convergence.
 
-    Returns the final (possibly tightened) claim, its verdict, the full
-    revision trail, and the final verdict card. SUPPORTED or INSUFFICIENT
-    claims are returned unchanged (rewording can't help when the text simply
-    doesn't address the claim).
+    Each round the loop can do two things, the same way the site does:
+      - revise: if the claim is OVERSTATED or UNSUPPORTED, rewrite it to match
+        what the evidence actually establishes and re-verify every reference.
+      - broaden: discover up to `want` corroborating papers across OpenAlex,
+        Crossref & Europe PMC that aren't already cited and verify the claim
+        against them — so a single-source claim becomes multi-source.
+    It stops when the claim is supported by `want` independent sources (and
+    needs no revision), when nothing changes, or at max_rounds.
+
+    Returns the final (possibly tightened) claim, its aggregate verdict and
+    strength, the revision trail, every reference's verdict (discovered ones
+    flagged), and the primary verdict card.
+
+    Args:
+        claim: the factual claim to check and improve.
+        reference: a DOI / PMID / PMCID / URL the claim already cites.
+        expected_title: optional claimed title, to catch wrong-paper citations.
+        max_rounds: cap on improve rounds (each adds model calls).
+        broaden: find corroborating sources (set False to only revise).
+        want: how many independent supporting sources to aim for.
     """
-    trail = []
+    trail, added_refs = [], []
     current = claim
-    verification = None
+    results = [await _verify(current, reference, expected_title, ctx)]
+
+    def discovered_supporting():
+        return sum(1 for r in results
+                   if r.get("discovered") and r["verdict"] == "SUPPORTED")
+
     for round_i in range(max(0, max_rounds) + 1):
-        verification = await _verify(current, reference, expected_title, ctx)
-        trail.append({"claim": current, "verdict": verification["verdict"],
-                      "confidence": verification.get("confidence")})
-        if verification["verdict"] in ("SUPPORTED", "INSUFFICIENT") \
-                or round_i >= max_rounds:
+        agg = _aggregate(results)
+        trail.append({"claim": current, "verdict": agg["verdict"],
+                      "strength": agg["strength"],
+                      "support_count": agg["support_count"],
+                      "total_refs": agg["total_refs"]})
+        need_revise = agg["verdict"] in ("OVERSTATED", "UNSUPPORTED")
+        need_broaden = broaden and discovered_supporting() < want
+        no_backend = bool(results) and results[0].get("judge_backend") == "none"
+        if (not need_revise and not need_broaden) \
+                or round_i >= max_rounds or no_backend:
             break
-        revised = await _run_revise(ctx, current, verification)
-        if not revised or revised.strip() == current.strip():
+        changed = False
+        if need_revise:
+            revised = await _run_revise(ctx, current, _worst_result(results))
+            if revised and revised.strip() != current.strip():
+                current = revised
+                re_results = []
+                for r in results:
+                    res = r.get("resolved") or {}
+                    ref_id = res.get("doi") or res.get("pmcid") or r.get("reference")
+                    nv = await _verify(current, ref_id, "", ctx)
+                    nv["discovered"] = r.get("discovered", False)
+                    re_results.append(nv)
+                results = re_results
+                changed = True
+        if need_broaden:
+            fresh = await _strengthen(current, results,
+                                      want - discovered_supporting(), ctx)
+            if fresh:
+                results.extend(fresh)
+                for f in fresh:
+                    res = f.get("resolved") or {}
+                    added_refs.append(res.get("doi") or res.get("pmcid")
+                                      or f.get("reference"))
+                changed = True
+        if not changed:
             break
-        current = revised
+
+    agg = _aggregate(results)
+    primary = results[0]
     return {
-        "revised": len(trail) > 1,
+        "revised": _judge._norm(current) != _judge._norm(claim),
         "original_claim": claim,
         "claim": current,
-        "verdict": verification["verdict"],
-        "confidence": verification.get("confidence"),
+        "verdict": agg["verdict"],
+        "confidence": agg["confidence"],
+        "strength": agg["strength"],
+        "support_count": agg["support_count"],
+        "total_refs": agg["total_refs"],
+        "added_refs": added_refs,
         "revisions": trail,
-        "verification": verification,
-        "card": verification.get("card"),
+        "references": results,
+        "verification": primary,
+        "card": primary.get("card"),
     }
 
 
