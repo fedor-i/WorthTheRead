@@ -74,7 +74,28 @@ async def _run_judge(ctx, claim: str, fetched: dict) -> dict:
 
 
 async def _verify(claim: str, reference: str, expected_title: str = "",
-                  ctx=None) -> dict:
+                  ctx=None, evidence_text: str = "") -> dict:
+    # Supplied-text mode: judge the claim against text handed in directly (a
+    # pasted passage, or a benchmark's gold abstract) with no DOI fetch. The
+    # quote-verification guard still runs against this text.
+    if evidence_text:
+        fetched = {"full_text": "## TEXT\n" + evidence_text,
+                   "sections": {"abstract": evidence_text},
+                   "sections_available": ["abstract"], "has_results": False,
+                   "open_access": False, "source": "supplied_text"}
+        result = await _run_judge(ctx, claim, fetched)
+        result.update({
+            "claim": claim, "reference": reference or "(supplied text)",
+            "citation_ok": None, "resolved": {}, "retracted": False,
+            "concern": False, "is_preprint": False, "published_as": None,
+            "has_preprint": None, "verified_from_preprint": None,
+            "verified_reference": None, "sections_available": ["abstract"],
+            "has_results": False, "open_access": False,
+            "fetch_source": "supplied_text", "resolve_error": None,
+        })
+        result["card"] = _render.render_card(result)
+        return result
+
     resolved = _resolve.resolve(reference, expected_title or None)
 
     # Prefer the published version of record: if the cited reference is a
@@ -127,8 +148,8 @@ async def _verify(claim: str, reference: str, expected_title: str = "",
 
 
 @mcp.tool()
-async def verify_claim(claim: str, reference: str, expected_title: str = "",
-                       ctx: Context = None) -> dict:
+async def verify_claim(claim: str, reference: str = "", expected_title: str = "",
+                       evidence_text: str = "", ctx: Context = None) -> dict:
     """Verify a scientific CLAIM against the REFERENCE it cites.
 
     Checks that the link resolves to a real, non-retracted paper, fetches the
@@ -141,8 +162,13 @@ async def verify_claim(claim: str, reference: str, expected_title: str = "",
         claim: the specific factual claim to check.
         reference: a DOI, PMID, PMCID, or URL for the cited paper.
         expected_title: optional claimed title, to catch wrong-paper citations.
+        evidence_text: verify against this text directly instead of fetching a
+            reference — for a pasted passage, or when you already hold the
+            source text (e.g. a benchmark's gold abstract). The quote guard
+            still runs against it.
     """
-    return await _verify(claim, reference, expected_title, ctx)
+    return await _verify(claim, reference, expected_title, ctx,
+                         evidence_text=evidence_text)
 
 
 @mcp.tool()

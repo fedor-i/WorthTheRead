@@ -11,6 +11,9 @@ venv/
 # Secrets / local config
 .env
 
+# Downloaded external benchmark data (fetched on demand by adapters)
+benchmark/adapters/scifact_data/
+
 # OS
 .DS_Store
 
