@@ -15,6 +15,8 @@ guard runs regardless of backend.
 
 Run (stdio):  python -m worth_your_read.server
 """
+from collections import Counter
+
 from mcp.server.fastmcp import Context, FastMCP
 
 from . import config as _config
@@ -74,8 +76,43 @@ async def _run_judge(ctx, claim: str, fetched: dict) -> dict:
         return r
 
 
+_GENEROSITY = {"SUPPORTED": 3, "OVERSTATED": 2, "UNSUPPORTED": 1, "INSUFFICIENT": 0}
+
+
+def _reconcile(results: list) -> dict:
+    """Majority vote over self-consistency passes. Ties break toward the safer
+    (less generous) verdict; confidence is scaled down when the passes disagree,
+    so an unstable claim reads as lower-confidence rather than flipping."""
+    if len(results) == 1:
+        return results[0]
+    verds = [r.get("verdict") for r in results]
+    cnt = Counter(verds)
+    top_n = max(cnt.values())
+    tied = [v for v, c in cnt.items() if c == top_n]
+    winner = min(tied, key=lambda v: _GENEROSITY.get(v, 0)) if len(tied) > 1 else tied[0]
+    rep = max((r for r in results if r.get("verdict") == winner),
+              key=lambda r: r.get("confidence") or 0)
+    agree = cnt[winner] / len(results)
+    rep["confidence"] = round((rep.get("confidence") or 0) * (0.6 + 0.4 * agree), 3)
+    rep["passes"] = len(results)
+    rep["pass_verdicts"] = verds
+    return rep
+
+
+async def _judge_consistent(ctx, claim: str, fetched: dict, passes: int) -> dict:
+    """Run the judge `passes` times and reconcile — self-consistency to remove
+    the run-to-run ambiguity on borderline claims."""
+    passes = max(1, min(5, passes))
+    if passes == 1:
+        return await _run_judge(ctx, claim, fetched)
+    results = [await _run_judge(ctx, claim, fetched) for _ in range(passes)]
+    if all(r.get("judge_backend") in ("none", "n/a", None) for r in results):
+        return results[0]   # no backend actually ran — don't fake a vote
+    return _reconcile(results)
+
+
 async def _verify(claim: str, reference: str, expected_title: str = "",
-                  ctx=None, evidence_text: str = "") -> dict:
+                  ctx=None, evidence_text: str = "", passes: int = 1) -> dict:
     # Supplied-text mode: judge the claim against text handed in directly (a
     # pasted passage, or a benchmark's gold abstract) with no DOI fetch. The
     # quote-verification guard still runs against this text.
@@ -84,7 +121,7 @@ async def _verify(claim: str, reference: str, expected_title: str = "",
                    "sections": {"abstract": evidence_text},
                    "sections_available": ["abstract"], "has_results": False,
                    "open_access": False, "source": "supplied_text"}
-        result = await _run_judge(ctx, claim, fetched)
+        result = await _judge_consistent(ctx, claim, fetched, passes)
         result.update({
             "claim": claim, "reference": reference or "(supplied text)",
             "citation_ok": None, "resolved": {}, "retracted": False,
@@ -123,7 +160,7 @@ async def _verify(claim: str, reference: str, expected_title: str = "",
             "quotes_verified": 0, "downgraded": False, "judge_backend": "n/a",
         }
     else:
-        result = await _run_judge(ctx, claim, fetched)
+        result = await _judge_consistent(ctx, claim, fetched, passes)
 
     result.update({
         "claim": claim,
@@ -150,7 +187,8 @@ async def _verify(claim: str, reference: str, expected_title: str = "",
 
 @mcp.tool()
 async def verify_claim(claim: str, reference: str = "", expected_title: str = "",
-                       evidence_text: str = "", ctx: Context = None) -> dict:
+                       evidence_text: str = "", passes: int = 1,
+                       ctx: Context = None) -> dict:
     """Verify a scientific CLAIM against the REFERENCE it cites.
 
     Checks that the link resolves to a real, non-retracted paper, fetches the
@@ -167,9 +205,12 @@ async def verify_claim(claim: str, reference: str = "", expected_title: str = ""
             reference — for a pasted passage, or when you already hold the
             source text (e.g. a benchmark's gold abstract). The quote guard
             still runs against it.
+        passes: self-consistency — judge this many times (odd, e.g. 3) and take
+            the majority verdict, to remove run-to-run ambiguity on borderline
+            claims; confidence drops when the passes disagree. Default 1.
     """
     return await _verify(claim, reference, expected_title, ctx,
-                         evidence_text=evidence_text)
+                         evidence_text=evidence_text, passes=passes)
 
 
 @mcp.tool()
@@ -422,7 +463,8 @@ async def revise_claim(claim: str, reference: str, expected_title: str = "",
 
 @mcp.tool()
 async def audit_paper(reference: str, max_claims: int = 8,
-                      section: str = "introduc", ctx: Context = None) -> dict:
+                      section: str = "introduc", passes: int = 1,
+                      ctx: Context = None) -> dict:
     """Audit a paper's own claims against the sources it cites.
 
     Pulls the paper's full text (Europe PMC JATS), takes a section (the
@@ -438,7 +480,7 @@ async def audit_paper(reference: str, max_claims: int = 8,
         section: section-title keyword to audit ("introduc", "discuss", ...).
     """
     async def vf(claim, ref):
-        return await _verify(claim, ref, ctx=ctx)
+        return await _verify(claim, ref, ctx=ctx, passes=passes)
 
     out = await _audit.run_audit(reference, vf, max_claims=max_claims,
                                  section=section)
