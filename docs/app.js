@@ -1069,3 +1069,73 @@ $("verifyBtn").onclick = async () => {
 };
 
 $("auditBtn").onclick = auditPaperFlow;
+
+// ---------- mode toggle ----------
+document.querySelectorAll(".tab").forEach(t => t.onclick = () => {
+  document.querySelectorAll(".tab").forEach(x => x.classList.toggle("active", x === t));
+  const m = t.dataset.mode;
+  document.querySelectorAll(".mode").forEach(sec => { sec.hidden = sec.id !== "mode-" + m; });
+});
+
+// ---------- fix a claim: find supporting sources ----------
+const FIX_STOP = new Set(("a an the of in on for to and or but with without is are was were be been being this that these those by from as at into than then so not no any all can could may might also more most using used use via per between within across their its it they we our new recent here show shows showed suggest suggests found find results result study paper enables enable enabling provides provide providing protects protect protecting acts act acting plays play role roles function functions mechanism mechanisms process processes reaction centre center effect effects increase increases reduce reduces improve improves associated related secondary primary pathway pathways involved involves").split(" "));
+function fixKeywords(text, k = 6) {
+  const seen = new Set(), terms = [];
+  for (const w of ((text || "").toLowerCase().match(/[a-z][a-z0-9-]{2,}/g) || [])) {
+    if (FIX_STOP.has(w) || seen.has(w)) continue;
+    seen.add(w); terms.push(w);
+  }
+  terms.sort((a, b) => {
+    const da = (a.includes("-") || /\d/.test(a)) ? 1 : 0, db = (b.includes("-") || /\d/.test(b)) ? 1 : 0;
+    return db - da || b.length - a.length;
+  });
+  return terms.slice(0, k).join(" ");
+}
+async function suggestSources(claim, key, model, n, exclude, breadth) {
+  const skip = (exclude || "").toLowerCase().replace("doi:", "").trim();
+  let cands = await discoverSources(claim, breadth);
+  const seen = new Set(cands.map(c => (c.doi || c.pmcid || "").toLowerCase()));
+  const kw = fixKeywords(claim);
+  if (kw && kw !== claim.toLowerCase()) {
+    for (const c of await discoverSources(kw, breadth)) {
+      const k = (c.doi || c.pmcid || "").toLowerCase();
+      if (k && !seen.has(k)) { seen.add(k); cands.push(c); }
+    }
+  }
+  cands.sort((a, b) => (b._score || 0) - (a._score || 0));
+  const found = []; let checked = 0;
+  for (const c of cands) {
+    const ref = c.doi || c.pmcid;
+    if (!ref || ref.toLowerCase() === skip || checked >= breadth) continue;
+    checked++;
+    $("fixStatus").textContent = `Verifying candidate ${checked}…`;
+    const r = await verifyClaim(claim, ref, key, model);
+    if (["SUPPORTED", "OVERSTATED"].includes(r.verdict))
+      found.push({ doi: c.doi, title: (r.resolved || {}).title || c.title, year: c.year,
+                   verdict: r.verdict, confidence: r.confidence, has_results: r.has_results });
+    if (found.filter(x => x.verdict === "SUPPORTED").length >= n) break;
+  }
+  found.sort((a, b) => ((a.verdict !== "SUPPORTED") - (b.verdict !== "SUPPORTED")) || (b.confidence || 0) - (a.confidence || 0));
+  return { checked, suggested: found.slice(0, n + 2) };
+}
+$("fixBtn").onclick = async () => {
+  const claim = $("fixClaim").value.trim(), key = $("key").value.trim(), model = $("model").value.trim() || "claude-sonnet-5-5";
+  const exclude = $("fixExclude").value.trim();
+  const breadth = Math.max(3, Math.min(16, parseInt($("fixBreadth").value) || 8));
+  if (!claim) { $("fixOut").innerHTML = `<div class="err">Enter a claim.</div>`; return; }
+  if (!key) { $("fixOut").innerHTML = `<div class="err">Add your Anthropic API key above.</div>`; return; }
+  $("fixBtn").disabled = true; $("fixOut").innerHTML = ""; $("fixStatus").textContent = "Searching for candidate papers…";
+  try {
+    const r = await suggestSources(claim, key, model, 3, exclude, breadth);
+    $("fixStatus").textContent = "";
+    if (!r.suggested.length) {
+      $("fixOut").innerHTML = `<div class="meta">Checked ${r.checked} papers — none supported the claim. Try rephrasing, or raise the breadth.</div>`;
+    } else {
+      $("fixOut").innerHTML = `<p class="meta">Checked ${r.checked} papers · ${r.suggested.length} suggestion(s), best first:</p>` +
+        r.suggested.map(s => `<div class="card ${s.verdict}"><div><span class="badge ${s.verdict}">${s.verdict}</span> <span class="meta">confidence ${(s.confidence || 0).toFixed(2)}${s.has_results ? " · full text" : " · abstract"}</span></div>
+        <p>${esc(s.title || "(untitled)")}${s.year ? ` (${esc(String(s.year))})` : ""}</p>
+        ${s.doi ? `<p class="meta"><a href="https://doi.org/${esc(s.doi)}" target="_blank" rel="noopener">${esc(s.doi)}</a></p>` : ""}</div>`).join("");
+    }
+  } catch (e) { $("fixStatus").textContent = ""; $("fixOut").innerHTML = `<div class="err">Search failed: ${esc(e.message)}</div>`; }
+  $("fixBtn").disabled = false;
+};
