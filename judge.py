@@ -51,10 +51,17 @@ actually asserts a size.
 Only create an aspect for something the CLAIM actually asserts. A claim is only \
 as strong as its weakest asserted aspect.
 
-Rule on EACH aspect separately, using ONLY the provided text:
-- "ENTAILED": the text directly establishes this aspect — give a VERBATIM quote.
-- "CONTRADICTED": the text states the opposite — give a VERBATIM quote.
+Rule on EACH aspect separately, IN THE CLAIM'S OWN POLARITY, using ONLY the \
+provided text:
+- "ENTAILED": the text establishes what the aspect asserts — quote the SINGLE \
+most decisive sentence (prefer RESULTS / CONCLUSION), VERBATIM.
+- "CONTRADICTED": the text establishes the OPPOSITE of what the aspect asserts \
+— give a VERBATIM quote. NEVER use CONTRADICTED when the text actually AGREES \
+with the claim.
 - "ABSENT": the text does not address this aspect — quote must be "".
+If the claim is negative ("X is NOT equivalent to Y", "no effect", "does not \
+increase"), the aspect IS that negative: ENTAILED when the text shows the \
+negative holds, CONTRADICTED only when the text shows the positive.
 
 Rules, in order:
 1. Weigh the RESULTS and CONCLUSION sections above the title and abstract. \
@@ -143,12 +150,19 @@ _TOOL = {
 }
 
 
+_LIGATURES = {0xFB00: "ff", 0xFB01: "fi", 0xFB02: "fl", 0xFB03: "ffi",
+              0xFB04: "ffl", 0xFB05: "st", 0xFB06: "st"}
+
+
 def _norm(s: str) -> str:
-    s = s or ""
+    s = (s or "").translate(_LIGATURES)
     s = re.sub(r"[‘’‛′]", "'", s)
     s = re.sub(r"[“”″]", '"', s)
     s = re.sub(r"[‐-―−]", "-", s)
     s = re.sub(r"[   ]", " ", s)
+    # Join words split by a line-break hyphen (PDF/column extraction artifact):
+    # "func-\ntion" -> "function"; genuine compounds ("cell-free") are untouched.
+    s = re.sub(r"(\w)-\s+(\w)", r"\1\2", s)
     return re.sub(r"\s+", " ", s).strip().lower()
 
 
