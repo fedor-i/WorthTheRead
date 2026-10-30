@@ -18,8 +18,8 @@ space. The primitives:
 | **SciFact** | claim vs abstract → SUPPORT/CONTRADICT/NOINFO | judge on supplied text | SUPPORTED→SUPPORT, UNSUPPORTED→CONTRADICT, INSUFFICIENT/OVERSTATED→NOINFO | **implemented** (`scifact.py`) |
 | **CiteAudit / CiteCheck** | is a reference real or fabricated/corrupted? | resolve / integrity | resolved & citation_ok & not retracted → valid; else hallucinated/invalid | **implemented** (`citation_integrity.py`) |
 | **CiteME** | find the paper a claim cites | discovery (`find_sources`) | gold DOI in top-k candidates → hit; score recall@k | **implemented** (`citeme.py`) |
-| **DeSpin / spin** | is an RCT abstract's conclusion spin? | judge: claim = stated conclusion, text = results section | OVERSTATED (esp. distortion=effect_size_spin) → spin; SUPPORTED → no spin | planned |
-| **ALCE** | is each generated statement supported by its cited passage? | judge on supplied text, per (statement, passage) | SUPPORTED → citation supported; else not | planned |
+| **ALCE** | is each generated statement supported by its cited passage? | judge on supplied text, per (statement, passage) | SUPPORTED → citation supported; else not | **implemented** (`alce.py`) |
+| **DeSpin / spin** | is an RCT abstract's conclusion spin? | judge: claim = stated conclusion, text = results section | OVERSTATED or UNSUPPORTED → spin; SUPPORTED → no spin | **implemented** (`despin.py`) |
 
 Early numbers (seed sets, not the benchmarks' full released data): SciFact
 oracle-label 67% zero-shot (Sonnet 4.5) with SUPPORT precision 1.00 / recall
@@ -27,7 +27,10 @@ oracle-label 67% zero-shot (Sonnet 4.5) with SUPPORT precision 1.00 / recall
 fully-fabricated-vs-real (the subtle metadata-corruption subset would be
 harder). CiteME find-the-source via discovery: recall@5 90%, MRR 0.72 on
 well-known papers (easier than CiteME's obscure-ML-paper set — drop their
-excerpts into ITEMS for the real number).
+excerpts into ITEMS for the real number). ALCE citation-support and DeSpin spin
+detection both 100% on clear-cut seed sets — those validate the wiring and the
+verdict→label mapping (spin surfaces as UNSUPPORTED on null results, which the
+OVERSTATED∪UNSUPPORTED mapping catches), not subtle real-corpus performance.
 
 Each adapter downloads its own data on demand into `scifact_data/` etc.
 (git-ignored) and is runnable as `python -m worth_your_read.benchmark.adapters.<name>`.
