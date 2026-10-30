@@ -748,6 +748,142 @@ async function draftClaims(question, key, model) {
   return (JSON.parse(raw).claims) || [];
 }
 
+// ---------- audit a paper's own citations ----------
+// Pull a paper's introduction (Europe PMC JATS, CORS-open), and for each
+// sentence that cites a reference, verify the claim against the paper it
+// actually cites (inline <xref> links) — then highlight the intro by verdict.
+const _ln = (el) => el.tagName.split(":").pop();
+async function fetchJATS(pmcid) {
+  pmcid = pmcid.toUpperCase().startsWith("PMC") ? pmcid.toUpperCase() : "PMC" + pmcid;
+  const r = await fetch(`https://www.ebi.ac.uk/europepmc/webservices/rest/${pmcid}/fullTextXML`);
+  if (!r.ok) return null;
+  const doc = new DOMParser().parseFromString(await r.text(), "application/xml");
+  return doc.querySelector("parsererror") ? null : doc;
+}
+function auditRefMap(doc) {
+  const map = {};
+  for (const ref of doc.getElementsByTagName("ref")) {
+    const rid = ref.getAttribute("id"); if (!rid) continue;
+    const at = ref.getElementsByTagName("article-title")[0];
+    let doi = null;
+    for (const pid of ref.getElementsByTagName("pub-id"))
+      if (pid.getAttribute("pub-id-type") === "doi") doi = (pid.textContent || "").trim();
+    map[rid] = { title: at ? at.textContent.replace(/\s+/g, " ").trim() : null, doi };
+  }
+  return map;
+}
+function flattenPara(el) {
+  let s = "";
+  for (const node of el.childNodes) {
+    if (node.nodeType === 3) s += node.nodeValue;
+    else if (node.nodeType === 1) {
+      if (_ln(node) === "xref" && node.getAttribute("ref-type") === "bibr")
+        s += ` [[${node.getAttribute("rid") || ""}]] `;
+      else s += flattenPara(node);
+    }
+  }
+  return s;
+}
+function findSectionEl(doc, kw) {
+  kw = kw.toLowerCase(); let fallback = null;
+  for (const sec of doc.getElementsByTagName("sec")) {
+    let title = "";
+    for (const ch of sec.children) if (_ln(ch) === "title") { title = ch.textContent.trim().toLowerCase(); break; }
+    if (title.includes(kw)) return sec;
+    if (!fallback && (title === "" || title === "background")) fallback = sec;
+  }
+  return fallback;
+}
+const SENT_RE = /(?<=[.!?])\s+(?=[A-Z0-9])/;
+function segmentSection(sec, refMap, maxClaims) {
+  const claims = [], paragraphs = [];
+  for (const p of sec.getElementsByTagName("p")) {
+    const para = [];
+    for (const sent of flattenPara(p).split(SENT_RE)) {
+      const rids = []; let m; const re = /\[\[([^\]]*)\]\]/g;
+      while ((m = re.exec(sent))) for (const r of m[1].split(/\s+/)) if (r) rids.push(r);
+      const text = sent.replace(/\[\[[^\]]*\]\]/g, "").replace(/\s+/g, " ").trim();
+      if (!text) continue;
+      const seg = { text, claim_idx: null };
+      if (rids.length && text.length >= 45 && claims.length < maxClaims) {
+        const cited = [...new Set(rids)].map(r => ({ rid: r, ...(refMap[r] || { title: null, doi: null }) }));
+        seg.claim_idx = claims.length;
+        claims.push({ claim: text, cited });
+      }
+      para.push(seg);
+    }
+    if (para.length) paragraphs.push(para);
+  }
+  return { claims, paragraphs };
+}
+async function doiFromTitle(title) {
+  if (!title) return null;
+  try {
+    const j = await getJSON(`https://api.crossref.org/works?query.bibliographic=${encodeURIComponent(title)}&rows=1&select=DOI`);
+    const items = (j.message && j.message.items) || [];
+    return items.length ? cleanDoi(items[0].DOI) : null;
+  } catch (e) { return null; }
+}
+const _AV = (v) => v === "SKIPPED" ? "INSUFFICIENT" : v;   // color class
+function auditHTML(out) {
+  const claims = out.claims, p = out.paper, counts = {};
+  claims.forEach(c => counts[c.verdict] = (counts[c.verdict] || 0) + 1);
+  const summ = Object.entries(counts).map(([k, v]) => `<span class="badge ${_AV(k)}">${esc(k)} ${v}</span>`).join(" ");
+  const prose = out.paragraphs.map(para => "<p>" + para.map(seg => {
+    const t = esc(seg.text);
+    if (seg.claim_idx != null && seg.claim_idx < claims.length) {
+      const v = claims[seg.claim_idx].verdict || "SKIPPED";
+      return `<span class="aclaim ${_AV(v)}" title="${esc(v)} — cites ${esc((claims[seg.claim_idx].verified_against||{}).title || (claims[seg.claim_idx].verified_against||{}).doi || "?")}">${t}<sup>${seg.claim_idx + 1}</sup></span>`;
+    }
+    return t;
+  }).join(" ") + "</p>").join("");
+  const detail = claims.map((c, i) => {
+    const v = c.verdict || "SKIPPED", va = c.verified_against || {};
+    const src = va.doi ? `<a href="https://doi.org/${esc(va.doi)}" target="_blank" rel="noopener">${esc(va.title || va.doi)}</a>` : esc(va.title || c.note || "unresolved");
+    const why = c.rationale ? `<p class="meta">${esc(c.rationale.slice(0, 300))}</p>` : "";
+    return `<div class="card ${_AV(v)}"><div><span class="badge ${_AV(v)}">${i + 1}. ${esc(v)}</span></div><p><b>Claim:</b> ${esc(c.claim)}</p><p class="meta">cites: ${src}</p>${why}</div>`;
+  }).join("");
+  return `<div class="scorecard"><div class="big">${esc(p.title || p.doi || p.pmcid || "paper")}</div>
+    <p class="meta">${p.doi ? `<a href="https://doi.org/${esc(p.doi)}" target="_blank" rel="noopener">${esc(p.doi)}</a> · ` : ""}introduction · ${summ}</p>
+    <p class="meta">Highlights are claims that cite a reference, coloured by whether that reference supports them.</p></div>
+    <div class="auditprose">${prose}</div>
+    <h2>Claim by claim</h2>${detail}`;
+}
+async function auditPaperFlow() {
+  const ref = $("auditRef").value.trim(), key = $("key").value.trim(), model = $("model").value.trim() || "claude-sonnet-5-5";
+  const maxClaims = Math.max(1, Math.min(20, parseInt($("auditMax").value) || 8));
+  if (!ref) { $("auditOut").innerHTML = `<div class="err">Enter a paper DOI / PMID / PMCID.</div>`; return; }
+  if (!key) { $("auditOut").innerHTML = `<div class="err">Add your Anthropic API key above.</div>`; return; }
+  $("auditBtn").disabled = true; $("auditOut").innerHTML = ""; $("auditStatus").textContent = "Resolving paper…";
+  try {
+    const res = await resolve(ref);
+    if (!res.pmcid) throw new Error("No open-access full text with citation links found for this paper (Europe PMC).");
+    $("auditStatus").textContent = "Fetching full text…";
+    const doc = await fetchJATS(res.pmcid);
+    if (!doc) throw new Error("Full-text JATS could not be retrieved from Europe PMC.");
+    const sec = findSectionEl(doc, "introduc");
+    if (!sec) throw new Error("No introduction section found in this paper.");
+    const { claims, paragraphs } = segmentSection(sec, auditRefMap(doc), maxClaims);
+    if (!claims.length) throw new Error("No cited claims found in the introduction.");
+    for (let i = 0; i < claims.length; i++) {
+      $("auditStatus").textContent = `Verifying claim ${i + 1} / ${claims.length}…`;
+      const c = claims[i];
+      let primary = c.cited.find(x => x.doi);
+      if (!primary) { const t = c.cited.find(x => x.title); if (t) { t.doi = await doiFromTitle(t.title); primary = t.doi ? t : null; } }
+      if (!primary) { c.verdict = "SKIPPED"; c.note = "cited reference could not be resolved to a DOI"; continue; }
+      const r = await verifyClaim(c.claim, primary.doi, key, model);
+      c.verified_against = primary; c.verdict = r.verdict; c.confidence = r.confidence;
+      c.rationale = r.rationale; c.has_results = r.has_results;
+    }
+    $("auditStatus").textContent = "";
+    $("auditOut").innerHTML = auditHTML({ paper: { title: res.title, doi: res.doi, pmcid: res.pmcid }, claims, paragraphs });
+  } catch (e) {
+    $("auditStatus").textContent = "";
+    $("auditOut").innerHTML = `<div class="err">Audit failed: ${esc(e.message)}</div>`;
+  }
+  $("auditBtn").disabled = false;
+}
+
 // ---------- UI wiring ----------
 function addClaimRow(claim="", references="") {
   const div = document.createElement("div");
@@ -931,3 +1067,5 @@ $("verifyBtn").onclick = async () => {
   $("results").innerHTML = scorecardHTML(scoreAnswer(claimResults, minConf)) + claimResults.map(claimCardHTML).join("");
   $("verifyBtn").disabled = false;
 };
+
+$("auditBtn").onclick = auditPaperFlow;

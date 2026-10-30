@@ -86,6 +86,14 @@
   .revstep { margin:.3em 0; font-size:.92rem; }
   .revstep.final { font-weight:600; }
   .revarrow { color:var(--muted); font-size:.78rem; margin:.2em 0; }
+  .auditprose { line-height:1.75; margin:1em 0; }
+  .auditprose p { margin:.8em 0; }
+  .aclaim { border-radius:3px; padding:0 2px; border-bottom:2px solid; cursor:help; }
+  .aclaim.SUPPORTED { border-bottom-color:var(--green-fg); background:var(--green-bg); }
+  .aclaim.OVERSTATED { border-bottom-color:var(--amber-fg); background:var(--amber-bg); }
+  .aclaim.UNSUPPORTED { border-bottom-color:var(--red-fg); background:var(--red-bg); }
+  .aclaim.INSUFFICIENT { border-bottom-color:var(--grey-fg); background:var(--grey-bg); }
+  .aclaim sup { font-size:.6rem; font-weight:700; opacity:.7; margin-left:1px; }
 </style>
 </head>
 <body>
@@ -138,6 +146,17 @@
   <button id="verifyBtn">Verify claims</button>
   <div id="status" class="spin"></div>
   <div id="results"></div>
+
+  <h2>Audit a paper's citations</h2>
+  <p class="hint">Paste a paper's DOI / PMID / PMCID. We pull its introduction and, for each sentence that cites a reference, check whether the cited paper actually supports it — using the paper's real inline citations — then show the intro with every claim highlighted by verdict. Open-access papers in Europe PMC only (needs your key).</p>
+  <div class="row" style="gap:8px; align-items:center">
+    <input type="text" id="auditRef" placeholder="10.7554/eLife.52614   or   PMC7077981" style="flex:1; min-width:220px">
+    <label style="flex:0 0 auto; font-weight:normal; color:var(--muted)">max claims
+      <input type="number" id="auditMax" value="8" min="1" max="20" style="width:56px; display:inline-block; padding:4px 6px"></label>
+    <button id="auditBtn" style="flex:0 0 auto">Audit paper</button>
+  </div>
+  <div id="auditStatus" class="spin"></div>
+  <div id="auditOut"></div>
 </div>
 <script type="module" src="./app.js"></script>
 </body>
