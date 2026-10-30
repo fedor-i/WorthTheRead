@@ -1,109 +1,113 @@
-"""Render human-readable verdict cards (markdown) so the output is
-comprehensible inline in any MCP host, not just machine JSON."""
+"""Render concise, scannable output — a one-line `summary` plus a tight verdict
+card — so results read well both for an agent relaying them and a human looking
+at them, instead of a wall of fields."""
+import re
+
 from .judge import DISTORTION_LABELS
 
-_BADGE = {
-    "SUPPORTED": "✓ SUPPORTED",
-    "OVERSTATED": "⚠ OVERSTATED",
-    "UNSUPPORTED": "✗ UNSUPPORTED",
-    "INSUFFICIENT": "— INSUFFICIENT EVIDENCE",
-}
+_BADGE = {"SUPPORTED": "✅ SUPPORTED", "OVERSTATED": "🟠 OVERSTATED",
+          "UNSUPPORTED": "❌ UNSUPPORTED", "INSUFFICIENT": "⚪ INSUFFICIENT"}
+_PLAIN = {"SUPPORTED": "the source supports this claim",
+          "OVERSTATED": "the claim overstates what the source shows",
+          "UNSUPPORTED": "the source does not support this claim",
+          "INSUFFICIENT": "can't be verified from the available text"}
+
+
+def _first_sentence(text: str, cap: int = 200) -> str:
+    text = (text or "").strip()
+    if not text:
+        return ""
+    s = re.split(r"(?<=[.!?])\s", text, maxsplit=1)[0]
+    return s if len(s) <= cap else text[:cap].rstrip() + "…"
+
+
+def summary(r: dict) -> str:
+    """One scannable line: verdict + plain meaning + the key caveat."""
+    v = r.get("verdict", "?")
+    band = (r.get("band") or "?").lower()
+    extra = ""
+    if r.get("retracted"):
+        extra = " — ⚠ the cited paper is RETRACTED"
+    elif r.get("citation_ok") is False and not r.get("verified_from_preprint"):
+        extra = " — ⚠ the citation may be the wrong paper"
+    elif v == "SUPPORTED" and not r.get("has_results"):
+        extra = " (abstract-level)"
+    return f"{v} · {band} confidence — {_PLAIN.get(v, v)}{extra}."
+
+
+def _linkage_line(r: dict):
+    pub = r.get("published_as")
+    if r.get("verified_from_preprint"):
+        return "↳ verified against the published version of record (you cited a preprint)"
+    if pub and pub.get("journal"):
+        yr = f" {pub['year']}" if pub.get("year") else ""
+        return f"↳ this is a preprint — later published in {pub['journal']}{yr}"
+    if r.get("is_preprint"):
+        return "↳ preprint — no peer-reviewed version found yet"
+    if r.get("has_preprint") and r["has_preprint"].get("doi"):
+        return f"↳ has a preprint ({r['has_preprint']['doi']})"
+    return None
 
 
 def render_card(r: dict) -> str:
     res = r.get("resolved", {})
-    lines = [f"**{_BADGE.get(r['verdict'], r['verdict'])}** · "
-             f"confidence: {r.get('band', '?')} "
-             f"({r.get('confidence', 0):.2f})"]
-
-    # citation / link status line
-    status = []
-    status.append("link ✓" if r.get("citation_ok") else "link ⚠")
+    flags = ["full text" if r.get("has_results") else "abstract only"]
     if r.get("retracted"):
-        status.append("**RETRACTED**")
+        flags.insert(0, "🚩 RETRACTED")
     elif r.get("concern"):
-        status.append("expression of concern")
-    status.append("full text ✓" if r.get("has_results")
-                  else "abstract only ⚠")
-    lines.append(" · ".join(status))
-
-    # Preprint <-> published-journal linkage: peer-review status is a trust cue.
-    pub = r.get("published_as")
-    pre = r.get("verified_from_preprint")
-    if pre:
-        lines.append(f"✅ verified against the published version of record — "
-                     f"cited reference was a preprint "
-                     f"([{pre}](https://doi.org/{pre}))")
-    elif pub and pub.get("journal"):
-        yr = f" ({pub['year']})" if pub.get("year") else ""
-        link = f" ([{pub['doi']}](https://doi.org/{pub['doi']}))" if pub.get("doi") else ""
-        lines.append(f"📄 preprint — later published in *{pub['journal']}*{yr}{link}")
-    elif r.get("is_preprint"):
-        lines.append("📄 preprint — no peer-reviewed journal version found yet")
-    elif r.get("has_preprint") and r["has_preprint"].get("doi"):
-        d = r["has_preprint"]["doi"]
-        lines.append(f"📄 has a preprint ([{d}](https://doi.org/{d}))")
+        flags.insert(0, "concern")
+    if r.get("citation_ok") is False and not r.get("verified_from_preprint"):
+        flags.append("⚠ wrong-paper?")
+    lines = [f"**{_BADGE.get(r['verdict'], r['verdict'])}** · "
+             f"{r.get('band', '?')} ({r.get('confidence', 0):.2f}) · "
+             + " · ".join(flags)]
+    link = _linkage_line(r)
+    if link:
+        lines.append(link)
     lines.append("")
 
-    lines.append(f"**Claim:** {r.get('claim', '')}")
+    lines.append(f"**Claim.** {r.get('claim', '')}")
     if res.get("title"):
-        cite = res["title"]
-        meta = ", ".join(x for x in (res.get("authors", "").split(",")[0]
-                                     if res.get("authors") else None,
-                                     str(res.get("year") or "")) if x)
-        lines.append(f"**Paper:** {cite}" + (f" ({meta})" if meta else ""))
+        who = (res.get("authors", "").split(",")[0] + ", "
+               if res.get("authors") else "") + str(res.get("year") or "")
+        who = who.strip(", ")
+        lines.append(f"**Source.** {res['title']}" + (f" — {who}" if who else ""))
 
     asps = r.get("aspects") or []
     if asps:
         icon = {"ENTAILED": "✓", "CONTRADICTED": "✗", "ABSENT": "—"}
-        lines.append("")
-        lines.append("**Claim breakdown** (each piece checked separately):")
-        for a in asps:
-            mark = icon.get(a.get("status"), "?")
-            lines.append(f"- {mark} **{a.get('type', '')}** — {a.get('text', '')}")
-            if a.get("quote"):
-                lines.append(f"  > “{a['quote']}”")
-
-    # Aspects already carry the verified quotes; show the standalone evidence
-    # block only when there's no decomposition.
-    ev = r.get("evidence") or []
-    if ev and not asps:
-        lines.append("")
-        lines.append("**Verified evidence:**")
-        for e in ev[:3]:
-            sec = e.get("section", "")
-            lines.append(f"> “{e['quote']}”" + (f" — §{sec}" if sec else ""))
-
-    if r.get("rationale"):
-        lines.append("")
-        lines.append(f"**Why:** {r['rationale']}")
+        lines.append("**Checked.** " + " · ".join(
+            f"{icon.get(a.get('status'), '?')} {a.get('type', '')}" for a in asps))
+        quote = next((a["quote"] for a in asps if a.get("quote")), None)
+        if quote:
+            lines.append(f"> “{quote}”")
+    else:
+        ev = r.get("evidence") or []
+        if ev and ev[0].get("quote"):
+            lines.append(f"> “{ev[0]['quote']}”")
 
     if r.get("verdict") == "OVERSTATED" and r.get("distortion_note"):
         d = DISTORTION_LABELS.get(r.get("distortion_type"),
                                   r.get("distortion_type") or "")
-        lines.append("")
-        lines.append(f"**Distortion ({d}):** {r['distortion_note']}")
+        lines.append(f"**Overstatement ({d}).** {_first_sentence(r['distortion_note'])}")
+    elif r.get("rationale"):
+        lines.append(f"**Why.** {_first_sentence(r['rationale'])}")
 
     if r.get("claim_aspects_unmet"):
-        lines.append("")
-        lines.append("**Not established:** "
-                     + "; ".join(r["claim_aspects_unmet"]))
-
-    if r.get("downgraded"):
-        lines.append("")
-        lines.append("_Downgraded to insufficient: no quote could be verified "
-                     "against the source text._")
+        lines.append(f"**Gap.** {'; '.join(r['claim_aspects_unmet'])[:220]}")
     return "\n".join(lines)
 
 
 def render_scorecard(s: dict) -> str:
-    lines = [f"## Overall confidence: {s['overall_confidence']:.2f} "
-             f"(grade {s['grade']}) across {s['n_claims']} claim(s)"]
+    sup = s.get("counts", {}).get("SUPPORTED", 0)
+    lines = [f"**Overall: grade {s['grade']} ({s['overall_confidence']:.2f})** — "
+             f"{sup}/{s['n_claims']} claims supported; "
+             f"{len(s.get('worth_your_read', []))} source(s) worth reading.", ""]
     if s.get("counts"):
         lines.append(" · ".join(f"{k}: {v}" for k, v in s["counts"].items()))
     if s.get("min_confidence"):
-        lines.append(f"Confidence threshold: {s['min_confidence']:.2f} — "
-                     f"{s.get('excluded_below_threshold', 0)} source(s) screened out below it")
+        lines.append(f"(threshold {s['min_confidence']:.2f} — "
+                     f"{s.get('excluded_below_threshold', 0)} screened out)")
     lines.append("")
     lines.append("### Worth your read")
     if not s.get("worth_your_read"):

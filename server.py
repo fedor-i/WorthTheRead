@@ -30,7 +30,23 @@ from . import plan as _plan
 from . import discover as _discover
 from . import audit as _audit
 
-mcp = FastMCP("worth-your-read")
+mcp = FastMCP("worth-your-read", instructions=(
+    "Verify scientific claims against the papers they cite, grounded in the "
+    "papers' real results (not just abstracts). Every result leads with a "
+    "plain-English `summary`; read `card` for the formatted detail.\n\n"
+    "Typical flow:\n"
+    "1. verify_claim(claim, reference) — is THIS claim supported by THIS paper? "
+    "Flags retractions, overstatement, and wrong-paper citations. Pass "
+    "evidence_text=... to check against text you already have.\n"
+    "2. If a claim is OVERSTATED or UNSUPPORTED, fix it: revise_claim rewrites "
+    "it to match the evidence; suggest_sources finds a citation that actually "
+    "supports it (pass the failing DOI as `exclude`).\n"
+    "3. score_answer([{claim, reference}, ...]) — grade a whole answer and get a "
+    "ranked 'worth your read' source list.\n"
+    "4. audit_paper(reference) — check a paper's own introduction against the "
+    "sources it cites (fix=True also suggests replacements).\n"
+    "5. find_sources(query) discovers papers; plan_search scopes a question "
+    "before verifying."))
 
 
 async def _run_judge(ctx, claim: str, fetched: dict) -> dict:
@@ -132,6 +148,7 @@ async def _verify(claim: str, reference: str, expected_title: str = "",
             "has_results": False, "open_access": False,
             "fetch_source": "supplied_text", "resolve_error": None,
         })
+        result["summary"] = _render.summary(result)
         result["card"] = _render.render_card(result)
         return result
 
@@ -182,6 +199,7 @@ async def _verify(claim: str, reference: str, expected_title: str = "",
         "fetch_source": fetched.get("source"),
         "resolve_error": resolved.get("error"),
     })
+    result["summary"] = _render.summary(result)
     result["card"] = _render.render_card(result)
     return result
 
@@ -230,6 +248,11 @@ async def score_answer(claims: list, min_confidence: float = 0.0,
         results.append(await _verify(c.get("claim", ""), c.get("reference", ""),
                                      c.get("expected_title", ""), ctx))
     summary = _score.score_answer(results, min_confidence=min_confidence)
+    sup = summary.get("counts", {}).get("SUPPORTED", 0)
+    summary["summary"] = (
+        f"Grade {summary['grade']} ({summary['overall_confidence']:.2f}): "
+        f"{sup}/{summary['n_claims']} claims supported, "
+        f"{len(summary.get('worth_your_read', []))} source(s) worth reading.")
     summary["card"] = _render.render_scorecard(summary)
     summary["claims"] = results
     return summary
@@ -445,8 +468,17 @@ async def revise_claim(claim: str, reference: str, expected_title: str = "",
 
     agg = _aggregate(results)
     primary = results[0]
+    revised = _judge._norm(current) != _judge._norm(claim)
+    start_v = trail[0]["verdict"] if trail else agg["verdict"]
+    if revised:
+        msg = (f"Rewrote the claim ({start_v} → {agg['verdict']}); "
+               f"now backed by {agg['support_count']} source(s) ({agg['strength']}).")
+    else:
+        msg = (f"Claim unchanged ({agg['verdict']}); "
+               f"{agg['support_count']} supporting source(s).")
     return {
-        "revised": _judge._norm(current) != _judge._norm(claim),
+        "revised": revised,
+        "summary": msg,
         "original_claim": claim,
         "claim": current,
         "verdict": agg["verdict"],
@@ -524,8 +556,14 @@ async def _suggest_sources(claim: str, n: int, exclude: str, breadth: int,
             break
     found.sort(key=lambda x: (x["verdict"] != "SUPPORTED", -(x["confidence"] or 0)))
     found = found[:n + 2]
+    sup = [s for s in found if s["verdict"] == "SUPPORTED"]
+    if sup:
+        msg = (f"Found {len(sup)} supporting source(s) out of {checked} checked — "
+               f"best: {(sup[0].get('title') or sup[0].get('doi') or '?')[:60]}.")
+    else:
+        msg = f"No supporting source found in {checked} candidates checked."
     return {"claim": claim, "checked": checked, "count": len(found),
-            "suggested": found}
+            "summary": msg, "suggested": found}
 
 
 @mcp.tool()
@@ -587,6 +625,18 @@ async def audit_paper(reference: str, max_claims: int = 8,
                 if top:  # only offer a genuinely supporting replacement
                     c["suggestion"] = top
 
+    if out.get("available"):
+        from collections import Counter as _C
+        cc = _C(c.get("verdict") for c in out.get("claims", []))
+        nsup = cc.get("SUPPORTED", 0)
+        nfix = sum(1 for c in out.get("claims", []) if c.get("suggestion"))
+        out["summary"] = (
+            f"Audited {len(out.get('claims', []))} cited claims in the "
+            f"{section}: {nsup} supported, "
+            f"{len(out.get('claims', [])) - nsup} not fully supported"
+            + (f"; suggested a replacement for {nfix}." if nfix else "."))
+    else:
+        out["summary"] = out.get("note", "Could not audit this paper.")
     out["card"] = _audit._render(out)
     return out
 
