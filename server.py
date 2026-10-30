@@ -25,6 +25,7 @@ from . import score as _score
 from . import render as _render
 from . import plan as _plan
 from . import discover as _discover
+from . import audit as _audit
 
 mcp = FastMCP("worth-your-read")
 
@@ -417,6 +418,32 @@ async def revise_claim(claim: str, reference: str, expected_title: str = "",
         "verification": primary,
         "card": primary.get("card"),
     }
+
+
+@mcp.tool()
+async def audit_paper(reference: str, max_claims: int = 8,
+                      section: str = "introduc", ctx: Context = None) -> dict:
+    """Audit a paper's own claims against the sources it cites.
+
+    Pulls the paper's full text (Europe PMC JATS), takes a section (the
+    introduction by default) and, for each sentence that cites a reference,
+    verifies that claim against the paper the authors actually cited — using
+    the inline citation links, so attribution is exact, not guessed. Returns a
+    per-claim verdict list, a markdown `card`, and a verdict summary. Needs an
+    open-access paper with full-text citation links; says so clearly otherwise.
+
+    Args:
+        reference: DOI / PMID / PMCID of the paper to audit.
+        max_claims: cap on cited sentences to check (each is a judge call).
+        section: section-title keyword to audit ("introduc", "discuss", ...).
+    """
+    async def vf(claim, ref):
+        return await _verify(claim, ref, ctx=ctx)
+
+    out = await _audit.run_audit(reference, vf, max_claims=max_claims,
+                                 section=section)
+    out["card"] = _audit._render(out)
+    return out
 
 
 @mcp.tool()
