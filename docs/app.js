@@ -840,7 +840,7 @@ function auditHTML(out) {
   const detail = claims.map((c, i) => {
     const v = c.verdict || "SKIPPED", va = c.verified_against || {};
     const src = va.doi ? `<a href="https://doi.org/${esc(va.doi)}" target="_blank" rel="noopener">${esc(va.title || va.doi)}</a>` : esc(va.title || c.note || "unresolved");
-    const why = c.rationale ? `<p class="meta">${esc(c.rationale.slice(0, 300))}</p>` : "";
+    const why = c.rationale ? `<p class="meta">${esc(c.rationale)}</p>` : "";
     return `<div class="card ${_AV(v)}"><div><span class="badge ${_AV(v)}">${i + 1}. ${esc(v)}</span></div><p><b>Claim:</b> ${esc(c.claim)}</p><p class="meta">cites: ${src}</p>${why}</div>`;
   }).join("");
   return `<div class="scorecard"><div class="big">${esc(p.title || p.doi || p.pmcid || "paper")}</div>

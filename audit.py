@@ -259,7 +259,7 @@ def render_html(out):
             srcdoi = va.get("doi")
             srcline = (f'<a href="https://doi.org/{_h.escape(srcdoi)}" target="_blank">{srctitle}</a>'
                        if srcdoi else srctitle)
-            why = _h.escape((c.get("rationale") or c.get("note") or "")[:400])
+            why = _h.escape(c.get("rationale") or c.get("note") or "")
             rows.append(
                 f'<div class="row" id="c{i}"><span class="badge v-{v}">{v}</span>'
                 f'<div class="rtext"><div class="cl">{i}. {_h.escape(c["claim"])}</div>'
