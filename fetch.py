@@ -22,6 +22,7 @@ EPMC_FULLTEXT = ("https://www.ebi.ac.uk/europepmc/webservices/rest/"
 OPENALEX_WORK = "https://api.openalex.org/works/doi:{doi}"
 CROSSREF_WORK = "https://api.crossref.org/works/{doi}"
 UNPAYWALL = "https://api.unpaywall.org/v2/{doi}"
+S2_PAPER = "https://api.semanticscholar.org/graph/v1/paper/{id}"
 
 _RETRIES = 3
 
@@ -38,6 +39,13 @@ _PRIORITY = ["results", "conclusion", "abstract", "methods", "discussion",
 
 def _headers():
     return {"User-Agent": config.USER_AGENT}
+
+
+def _s2_headers():
+    h = {"User-Agent": config.USER_AGENT}
+    if config.S2_API_KEY:
+        h["x-api-key"] = config.S2_API_KEY
+    return h
 
 
 def _strip(text: str) -> str:
@@ -298,6 +306,94 @@ def _oa_fulltext(resolved: dict) -> dict:
     return {}
 
 
+def _pdf_to_text(content: bytes) -> str:
+    """Extract text from a PDF (pypdf). Returns '' if unavailable/unparseable."""
+    try:
+        import io
+        import pypdf
+        reader = pypdf.PdfReader(io.BytesIO(content))
+        parts = [(pg.extract_text() or "") for pg in reader.pages[:40]]
+        return _strip("\n".join(p for p in parts if p))
+    except Exception:
+        return ""
+
+
+def _oa_pdf_urls(doi: str) -> list:
+    """Open-access PDF URLs for a DOI, from OpenAlex, Crossref, Semantic Scholar,
+    and Unpaywall (email opt-in)."""
+    urls = []
+    try:
+        j = requests.get(OPENALEX_WORK.format(doi=doi),
+                         params={"select": "best_oa_location,primary_location,locations"},
+                         headers=_headers(), timeout=config.HTTP_TIMEOUT).json()
+        for loc in [j.get("best_oa_location"), j.get("primary_location")] + \
+                (j.get("locations") or []):
+            if loc and loc.get("pdf_url"):
+                urls.append(loc["pdf_url"])
+    except Exception:
+        pass
+    try:
+        m = requests.get(CROSSREF_WORK.format(doi=doi), headers=_headers(),
+                         timeout=config.HTTP_TIMEOUT).json().get("message", {})
+        for lk in (m.get("link") or []):
+            if "pdf" in (lk.get("content-type") or "").lower() and lk.get("URL"):
+                urls.append(lk["URL"])
+    except Exception:
+        pass
+    try:
+        j = requests.get(S2_PAPER.format(id=f"DOI:{doi}"),
+                         params={"fields": "openAccessPdf"}, headers=_s2_headers(),
+                         timeout=config.HTTP_TIMEOUT).json()
+        if (j.get("openAccessPdf") or {}).get("url"):
+            urls.append(j["openAccessPdf"]["url"])
+    except Exception:
+        pass
+    if config.CONTACT_EMAIL:
+        try:
+            j = requests.get(UNPAYWALL.format(doi=doi),
+                             params={"email": config.CONTACT_EMAIL},
+                             headers=_headers(), timeout=config.HTTP_TIMEOUT).json()
+            if (j.get("best_oa_location") or {}).get("url_for_pdf"):
+                urls.append(j["best_oa_location"]["url_for_pdf"])
+        except Exception:
+            pass
+    seen = []
+    for u in urls:
+        if u and u not in seen:
+            seen.append(u)
+    return seen[:5]
+
+
+def _pdf_fulltext(resolved: dict) -> dict:
+    """Full text from an open-access PDF (unsectioned -> 'other' bucket)."""
+    doi = resolved.get("doi")
+    if not doi:
+        return {}
+    for url in _oa_pdf_urls(doi):
+        try:
+            r = requests.get(url, headers={"User-Agent": config.USER_AGENT},
+                             timeout=config.HTTP_TIMEOUT, allow_redirects=True)
+        except Exception:
+            continue
+        ct = (r.headers.get("content-type") or "").lower()
+        if r.status_code != 200 or ("pdf" not in ct and not r.content[:5] == b"%PDF-"):
+            continue
+        text = _pdf_to_text(r.content)
+        if len(text) >= 1500:
+            return {"other": text}
+    return {}
+
+
+def _s2_abstract(doi: str) -> str:
+    try:
+        j = requests.get(S2_PAPER.format(id=f"DOI:{doi}"),
+                         params={"fields": "abstract"}, headers=_s2_headers(),
+                         timeout=config.HTTP_TIMEOUT).json()
+        return _strip(j.get("abstract") or "")
+    except Exception:
+        return ""
+
+
 def _epmc_core(resolved: dict) -> dict:
     """Europe PMC 'core' record for a DOI/PMID (covers most of PubMed). Carries
     the abstract, the PMCID (even when NCBI's converter didn't link it), and OA
@@ -388,11 +484,24 @@ def fetch_text(resolved: dict) -> dict:
         except Exception:
             pass
 
-    # 3) Fallback: abstract only (reuse the core record if we already fetched it).
+    # 2d) Open-access PDF (OpenAlex/Crossref/Semantic Scholar/Unpaywall), parsed.
+    if not out["sections"]:
+        try:
+            secs = _pdf_fulltext(resolved)
+            if secs:
+                out["sections"] = secs
+                out["open_access"] = True
+                out["source"] = "oa_pdf"
+        except Exception:
+            pass
+
+    # 3) Fallback: abstract only (Europe PMC, then Semantic Scholar).
     if not out["sections"]:
         if not core:
             core = _epmc_core(resolved)
         abstract = _strip(core.get("abstractText", "")) if core else ""
+        if not abstract and resolved.get("doi"):
+            abstract = _s2_abstract(resolved["doi"])
         if abstract:
             out["sections"] = {"abstract": abstract}
             out["source"] = "abstract_only"

@@ -70,9 +70,9 @@ and drop `WYR_USE_BEDROCK`.
 
 | Stage | Source |
 | --- | --- |
-| Discover sources | OpenAlex + Crossref + Europe PMC (parallel, keyless) + citation-trail round, deduped by DOI, trust-ranked, retractions dropped |
+| Discover sources | OpenAlex + Crossref + Europe PMC + Semantic Scholar (parallel, keyless) + citation-trail round, deduped by DOI, trust-ranked, retractions dropped |
 | Resolve link + retraction check | Crossref (`updated-by` field) + NCBI ID Converter |
-| Fetch real results | PMC BioC JSON (section-tagged) → Europe PMC full-text XML → preprint full text (bioRxiv/medRxiv HTML, then arXiv HTML/ar5iv, section-split) → abstract. PMCID recovered via Europe PMC when NCBI didn't link it |
+| Fetch real results | PMC BioC JSON → Europe PMC XML → preprint HTML (bioRxiv/medRxiv, then arXiv/ar5iv) → OA-publisher HTML → **OA PDF** (OpenAlex/Crossref/Semantic Scholar/Unpaywall, parsed with pypdf) → abstract (Europe PMC, then Semantic Scholar). PMCID recovered via Europe PMC when NCBI didn't link it |
 | Judge | Claude (forced structured output) |
 | Anti-hallucination guard | every quote must be an exact substring of the source, else the verdict is forced to INSUFFICIENT |
 

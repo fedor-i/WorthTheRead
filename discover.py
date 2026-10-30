@@ -28,10 +28,11 @@ from . import config
 OPENALEX = "https://api.openalex.org/works"
 CROSSREF = "https://api.crossref.org/works"
 EPMC = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
+S2_SEARCH = "https://api.semanticscholar.org/graph/v1/paper/search"
 
 _REVIEW_RE = re.compile(r"review|meta-analysis|meta analysis", re.I)
 _PREPRINT_RE = re.compile(r"preprint|biorxiv|medrxiv|arxiv|posted-content", re.I)
-_BANG_RE = re.compile(r"(?:^|\s)(![a-z]+)\b", re.I)
+_BANG_RE = re.compile(r"(?:^|\s)(![a-z0-9]+)\b", re.I)
 
 # Fields we pull from OpenAlex works (round 1 and citation-trail fetch alike).
 _OA_SELECT = ("id,doi,display_name,title,publication_year,primary_location,"
@@ -43,6 +44,7 @@ BANGS = {
     "!oa": "openalex", "!openalex": "openalex",
     "!cr": "crossref", "!crossref": "crossref",
     "!epmc": "epmc", "!europepmc": "epmc", "!pm": "epmc", "!pubmed": "epmc",
+    "!s2": "s2", "!ss": "s2", "!semanticscholar": "s2",
 }
 
 
@@ -58,8 +60,8 @@ def _headers():
 
 
 def _get_json(url, params):
-    # Polite-pool contact only when the user explicitly configured one.
-    if config.CONTACT_EMAIL and "mailto" not in params and url != EPMC:
+    # Polite-pool contact only for OpenAlex/Crossref, and only when configured.
+    if config.CONTACT_EMAIL and "mailto" not in params and url in (OPENALEX, CROSSREF):
         params = {**params, "mailto": config.CONTACT_EMAIL}
     r = requests.get(url, params=params, headers=_headers(),
                      timeout=config.HTTP_TIMEOUT)
@@ -132,8 +134,34 @@ def _epmc_search(query, n):
     return out
 
 
+def _s2_search(query, n):
+    h = _headers()
+    if config.S2_API_KEY:
+        h["x-api-key"] = config.S2_API_KEY
+    r = requests.get(S2_SEARCH, params={
+        "query": query, "limit": n,
+        "fields": "title,year,venue,citationCount,externalIds,isOpenAccess,publicationTypes",
+    }, headers=h, timeout=config.HTTP_TIMEOUT)
+    r.raise_for_status()
+    j = r.json()
+    out = []
+    for i, p in enumerate(j.get("data") or []):
+        ext = p.get("externalIds") or {}
+        out.append({
+            "doi": clean_doi(ext.get("DOI")),
+            "pmcid": ("PMC" + str(ext["PubMedCentral"])) if ext.get("PubMedCentral") else None,
+            "pmid": str(ext["PubMed"]) if ext.get("PubMed") else None,
+            "title": p.get("title"), "year": p.get("year"), "venue": p.get("venue"),
+            "citations": p.get("citationCount") or 0,
+            "type": " ".join(p.get("publicationTypes") or []),
+            "is_oa": bool(p.get("isOpenAccess")), "retracted": False,
+            "provider": "s2", "rank": i, "cocite": 0,
+        })
+    return out
+
+
 PROVIDERS = {"openalex": _openalex_search, "crossref": _crossref_search,
-             "epmc": _epmc_search}
+             "epmc": _epmc_search, "s2": _s2_search}
 
 
 def _openalex_fetch_ids(short_ids, cocite):
@@ -247,7 +275,7 @@ def discover_sources(raw_query, n=3, scope=None, peer_reviewed_only=False,
     if not query:
         return []
 
-    names = [scope] if scope else ["openalex", "crossref", "epmc"]
+    names = [scope] if scope else ["openalex", "crossref", "epmc", "s2"]
     per = max(n + 3, 8)
 
     def _safe(name):

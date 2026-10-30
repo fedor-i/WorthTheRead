@@ -30,6 +30,10 @@ BEDROCK_MODEL = os.environ.get("WYR_BEDROCK_MODEL", "").strip()
 # it when the user explicitly sets it, never a personal address by default.
 CONTACT_EMAIL = os.environ.get("WYR_CONTACT_EMAIL", "").strip()
 
+# Semantic Scholar API key (optional). Keyless works but is heavily rate-limited;
+# a key makes the S2 discovery provider and PDF/abstract fallback reliable.
+S2_API_KEY = os.environ.get("WYR_S2_API_KEY", os.environ.get("S2_API_KEY", "")).strip()
+
 # User-Agent all outbound requests carry (good web citizenship + polite pool).
 _ua = "WorthYourRead/0.1 (https://github.com/; mailto:{})"
 USER_AGENT = _ua.format(CONTACT_EMAIL) if CONTACT_EMAIL else "WorthYourRead/0.1"
