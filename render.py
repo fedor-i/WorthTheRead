@@ -29,7 +29,12 @@ def render_card(r: dict) -> str:
 
     # Preprint <-> published-journal linkage: peer-review status is a trust cue.
     pub = r.get("published_as")
-    if pub and pub.get("journal"):
+    pre = r.get("verified_from_preprint")
+    if pre:
+        lines.append(f"✅ verified against the published version of record — "
+                     f"cited reference was a preprint "
+                     f"([{pre}](https://doi.org/{pre}))")
+    elif pub and pub.get("journal"):
         yr = f" ({pub['year']})" if pub.get("year") else ""
         link = f" ([{pub['doi']}](https://doi.org/{pub['doi']}))" if pub.get("doi") else ""
         lines.append(f"📄 preprint — later published in *{pub['journal']}*{yr}{link}")

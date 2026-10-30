@@ -353,7 +353,15 @@ async function judge(claim, fetched, key, model) {
 
 // ---------- verify one claim ----------
 async function verifyClaim(claim, reference, key, model) {
-  const res = await resolve(reference);
+  let res = await resolve(reference);
+  // Prefer the published version of record: if the cited reference is a
+  // preprint that later cleared peer review, verify against the published paper.
+  let verifiedFromPreprint = null;
+  const pub = res.is_preprint ? res.published_as : null;
+  if (pub && pub.doi) {
+    const pubRes = await resolve(pub.doi);
+    if (pubRes.resolved) { verifiedFromPreprint = res.doi; res = pubRes; }
+  }
   const fetched = await fetchText(res);
   let result;
   if (res.retracted) {
@@ -367,7 +375,9 @@ async function verifyClaim(claim, reference, key, model) {
     claim, reference, citation_ok: res.citation_ok, retracted: res.retracted, concern: res.concern,
     resolved: { title:res.title, authors:res.authors, year:res.year, journal:res.journal, doi:res.doi, pmcid:res.pmcid,
                 citations:res.citations, type:res.type, is_oa:res.is_oa,
-                is_preprint:res.is_preprint, published_as:res.published_as, has_preprint:res.has_preprint },
+                is_preprint:res.is_preprint, published_as:res.published_as, has_preprint:res.has_preprint,
+                verified_from_preprint: verifiedFromPreprint },
+    verified_from_preprint: verifiedFromPreprint,
     has_results: fetched.has_results, sections_available: fetched.sections_available, open_access: fetched.open_access,
   });
   return result;
@@ -826,8 +836,11 @@ function cardHTML(r, hideClaim=false) {
     res.is_oa ? "open access" : null,
   ].filter(Boolean).join(" · ");
   const pub = res.published_as;
+  const pre = res.verified_from_preprint;
   let preLine = "";
-  if (pub && pub.journal) {
+  if (pre) {
+    preLine = `<p class="meta">✅ verified against the published version of record — cited reference was a preprint · <a href="https://doi.org/${esc(pre)}" target="_blank" rel="noopener">${esc(pre)}</a></p>`;
+  } else if (pub && pub.journal) {
     const yr = pub.year ? ` (${esc(String(pub.year))})` : "";
     const link = pub.doi ? ` · <a href="https://doi.org/${esc(pub.doi)}" target="_blank" rel="noopener">${esc(pub.doi)}</a>` : "";
     preLine = `<p class="meta">📄 preprint — later published in <i>${esc(pub.journal)}</i>${yr}${link}</p>`;

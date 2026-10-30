@@ -76,6 +76,18 @@ async def _run_judge(ctx, claim: str, fetched: dict) -> dict:
 async def _verify(claim: str, reference: str, expected_title: str = "",
                   ctx=None) -> dict:
     resolved = _resolve.resolve(reference, expected_title or None)
+
+    # Prefer the published version of record: if the cited reference is a
+    # preprint that later cleared peer review, verify the claim against the
+    # published paper instead, recording where we started.
+    verified_from_preprint = None
+    pub = resolved.get("published_as") if resolved.get("is_preprint") else None
+    if pub and pub.get("doi"):
+        pub_resolved = _resolve.resolve(pub["doi"])
+        if pub_resolved.get("resolved"):
+            verified_from_preprint = resolved.get("doi")
+            resolved = pub_resolved
+
     fetched = _fetch.fetch_text(resolved)
 
     if resolved.get("retracted"):
@@ -102,6 +114,8 @@ async def _verify(claim: str, reference: str, expected_title: str = "",
         "is_preprint": resolved.get("is_preprint", False),
         "published_as": resolved.get("published_as"),
         "has_preprint": resolved.get("has_preprint"),
+        "verified_from_preprint": verified_from_preprint,
+        "verified_reference": resolved.get("doi") or reference,
         "sections_available": fetched.get("sections_available", []),
         "has_results": fetched.get("has_results", False),
         "open_access": fetched.get("open_access", False),
