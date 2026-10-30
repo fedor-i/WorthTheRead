@@ -45,12 +45,52 @@ function retractionFlags(msg) {
   }
   return out;
 }
+// Preprint <-> published-journal linkage: a cited preprint that later cleared
+// peer review is more trustworthy; one that never did is a mild caution.
+async function biorxivPublished(doi) {
+  for (const server of ["biorxiv", "medrxiv"]) {
+    try {
+      const j = await getJSON(`https://api.biorxiv.org/details/${server}/${doi}`);  // literal slashes in the DOI path
+      const coll = j.collection || [];
+      const pub = ((coll.length ? coll[coll.length - 1].published : "") || "");
+      if (pub && pub.toUpperCase() !== "NA") return pub;
+    } catch (e) { /* non-fatal */ }
+  }
+  return null;
+}
+function relationDoi(msg, key) {
+  for (const r of ((msg.relation && msg.relation[key]) || []))
+    if ((r["id-type"] || "").toLowerCase() === "doi" && r.id) return r.id;
+  return null;
+}
+async function journalMeta(doi) {
+  try {
+    const m = (await getJSON(`https://api.crossref.org/works/${encodeURIComponent(doi)}`)).message;
+    let year = null;
+    for (const k of ["published-print","published-online","issued"]) {
+      const dp = m[k] && m[k]["date-parts"]; if (dp && dp[0] && dp[0][0]) { year = dp[0][0]; break; }
+    }
+    return { doi, journal:(m["container-title"] && m["container-title"][0]) || null, year };
+  } catch (e) { return { doi, journal:null, year:null }; }
+}
+async function preprintLinks(out, msg) {
+  const doi = out.doi || "";
+  out.is_preprint = (msg.type || "").toLowerCase().includes("posted-content") || doi.startsWith("10.1101/");
+  if (out.is_preprint) {
+    let pub = doi.startsWith("10.1101/") ? await biorxivPublished(doi) : null;
+    pub = pub || relationDoi(msg, "is-preprint-of");
+    if (pub) out.published_as = await journalMeta(pub);
+  } else {
+    const pre = relationDoi(msg, "has-preprint");
+    if (pre) out.has_preprint = { doi: pre };
+  }
+}
 async function resolve(ref) {
   const ids = parseReference(ref);
   const out = { ids, resolved:false, citation_ok:false, title:null, authors:null,
                 year:null, journal:null, doi:ids.doi, pmcid:ids.pmcid, pmid:ids.pmid,
                 retracted:false, concern:false, citations:null, type:null, is_oa:false,
-                error:null };
+                is_preprint:false, published_as:null, has_preprint:null, error:null };
   // Fill ids / metadata via Europe PMC when we lack a DOI.
   let epmc = null;
   try {
@@ -92,6 +132,7 @@ async function resolve(ref) {
     if (msg["is-referenced-by-count"] != null) out.citations = msg["is-referenced-by-count"];
     out.type = out.type || msg.type || null;
     Object.assign(out, retractionFlags(msg));
+    await preprintLinks(out, msg);
   } catch (e) {
     if (out.title) { out.resolved = true; out.citation_ok = true; }
     else out.error = `DOI did not resolve at Crossref (${e.message}).`;
@@ -325,7 +366,8 @@ async function verifyClaim(claim, reference, key, model) {
   Object.assign(result, {
     claim, reference, citation_ok: res.citation_ok, retracted: res.retracted, concern: res.concern,
     resolved: { title:res.title, authors:res.authors, year:res.year, journal:res.journal, doi:res.doi, pmcid:res.pmcid,
-                citations:res.citations, type:res.type, is_oa:res.is_oa },
+                citations:res.citations, type:res.type, is_oa:res.is_oa,
+                is_preprint:res.is_preprint, published_as:res.published_as, has_preprint:res.has_preprint },
     has_results: fetched.has_results, sections_available: fetched.sections_available, open_access: fetched.open_access,
   });
   return result;
@@ -783,11 +825,23 @@ function cardHTML(r, hideClaim=false) {
     (res.citations != null) ? `${res.citations} citation${res.citations===1?"":"s"}` : null,
     res.is_oa ? "open access" : null,
   ].filter(Boolean).join(" · ");
+  const pub = res.published_as;
+  let preLine = "";
+  if (pub && pub.journal) {
+    const yr = pub.year ? ` (${esc(String(pub.year))})` : "";
+    const link = pub.doi ? ` · <a href="https://doi.org/${esc(pub.doi)}" target="_blank" rel="noopener">${esc(pub.doi)}</a>` : "";
+    preLine = `<p class="meta">📄 preprint — later published in <i>${esc(pub.journal)}</i>${yr}${link}</p>`;
+  } else if (res.is_preprint) {
+    preLine = `<p class="meta">📄 preprint — no peer-reviewed journal version found yet</p>`;
+  } else if (res.has_preprint && res.has_preprint.doi) {
+    preLine = `<p class="meta">📄 has a preprint · <a href="https://doi.org/${esc(res.has_preprint.doi)}" target="_blank" rel="noopener">${esc(res.has_preprint.doi)}</a></p>`;
+  }
   return `<div class="card ${r.verdict}">
     <div><span class="badge ${r.verdict}">${BADGE[r.verdict]}</span> &nbsp;<span class="meta">confidence: ${r.band} (${(r.confidence||0).toFixed(2)}) · ${status}</span></div>
     ${hideClaim ? "" : `<p><b>Claim:</b> ${esc(r.claim)}</p>`}
     ${res.title?`<p class="meta"><b>Paper:</b> ${esc(res.title)}${res.year?` (${esc(res.year)})`:""}${res.doi?` · <a href="https://doi.org/${esc(res.doi)}" target="_blank" rel="noopener">${esc(res.doi)}</a>`:""}</p>`:""}
     ${trust?`<p class="meta">${esc(trust)}</p>`:""}
+    ${preLine}
     ${asp}
     ${ev?`<div><b>Verified evidence:</b>${ev}</div>`:""}
     ${why}${dist}${unmet}
