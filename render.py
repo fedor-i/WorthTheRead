@@ -13,10 +13,11 @@ _PLAIN = {"SUPPORTED": "the source supports this claim",
           "INSUFFICIENT": "can't be verified from the available text"}
 
 
-def _first_sentence(text: str, cap: int = 200) -> str:
+def _first_sentence(text: str, cap: int = 220) -> str:
     text = (text or "").strip()
     if not text:
         return ""
+    text = text.split("\n", 1)[0].strip()          # lead line (drop list tails)
     s = re.split(r"(?<=[.!?])\s", text, maxsplit=1)[0]
     return s if len(s) <= cap else text[:cap].rstrip() + "…"
 
