@@ -11,6 +11,7 @@ Three backends, same guard:
 The server prefers sampling; this module exposes the prompt builders it needs
 plus the api/bedrock path and the shared finalize()/quote-verification.
 """
+import difflib
 import json
 import os
 import re
@@ -62,7 +63,16 @@ Abstracts overstate; results qualify.
 3. Quote VERBATIM. Every quote must be copied exactly from the paper text, \
 word for word, including numbers and punctuation. Never paraphrase inside a \
 quote.
-4. Give an overall verdict consistent with the aspects:
+4. Judge MEANING, not wording. An aspect is ENTAILED when the text states the \
+same fact in ANY words — synonyms and paraphrases of the paper's own wording \
+count. Quote the paper's wording; do not require it to echo the claim's words.
+5. Numbers carry error. Treat quantities that agree within rounding, unit \
+conversion, or overlapping confidence intervals as ENTAILED, not CONTRADICTED; \
+mark a magnitude CONTRADICTED only when the values genuinely disagree.
+6. Mind negation. If the claim asserts a negative ("X is NOT equivalent to Y", \
+"no effect"), it is ENTAILED when the text establishes that negative, and \
+CONTRADICTED only when the text establishes the opposite (positive) claim.
+7. Give an overall verdict consistent with the aspects:
    - SUPPORTED: every asserted aspect is ENTAILED.
    - OVERSTATED: the core relationship holds, but a qualifier (magnitude, \
 population, causality) is unestablished or exaggerated (correlation stated as \
@@ -70,7 +80,7 @@ causation, an animal result stated for humans, caveats dropped, a small effect \
 stated as proven, a subgroup presented as the main finding).
    - UNSUPPORTED: the paper contradicts the claim's core.
    - INSUFFICIENT: the core relationship itself is absent from the text.
-5. If OVERSTATED, name the distortion type and explain the gap."""
+8. If OVERSTATED, name the distortion type and explain the gap."""
 
 # Appended for backends that can't use tool-use (MCP sampling): demand JSON.
 _JSON_INSTRUCTIONS = (
@@ -142,6 +152,15 @@ def _norm(s: str) -> str:
     return re.sub(r"\s+", " ", s).strip().lower()
 
 
+_ALNUM_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _norm_alnum(s: str) -> str:
+    """Normalize to lowercase alphanumeric words only — drops punctuation,
+    ligatures, dashes and spacing noise that HTML/PDF extraction introduces."""
+    return _ALNUM_RE.sub(" ", _norm(s)).strip()
+
+
 def _quote_verified(quote: str, haystack_norm: str) -> bool:
     q = _norm(quote)
     if len(q) < 12:
@@ -150,14 +169,24 @@ def _quote_verified(quote: str, haystack_norm: str) -> bool:
         return True
     if len(q) >= 60 and q[:60] in haystack_norm:
         return True
-    # Relaxed fallback: a long contiguous verbatim run (10+ words) still present
-    # exactly in the source — tolerates a dropped clause elsewhere in the quote
-    # without weakening the anti-hallucination guarantee.
+    # A long contiguous verbatim run (10+ words) still present exactly.
     words = [w for w in q.split(" ") if w]
     if len(words) >= 10:
         for i in range(0, len(words) - 10 + 1):
             if " ".join(words[i:i + 10]) in haystack_norm:
                 return True
+    # Fuzzy fallback: compare on alphanumeric words only, so a real excerpt that
+    # differs from the source by extraction noise (ligatures, spacing), number
+    # formatting, or a few synonyms/dropped words still verifies — while a
+    # fabricated quote (little in-order overlap) does not.
+    qa = _norm_alnum(quote).split()
+    if len(qa) >= 6:
+        ha = _norm_alnum(haystack_norm).split()
+        if " ".join(qa) in " ".join(ha):
+            return True
+        sm = difflib.SequenceMatcher(None, ha, qa, autojunk=False)
+        if sum(b.size for b in sm.get_matching_blocks()) / len(qa) >= 0.8:
+            return True
     return False
 
 
@@ -230,7 +259,7 @@ def revise_claim_api(claim: str, result: dict) -> str:
     """Propose a tightened claim via the api/bedrock backend."""
     client, model = _client_and_model()
     msg = client.messages.create(
-        model=model, max_tokens=400, system=_REVISE_SYSTEM,
+        model=model, max_tokens=400, system=_REVISE_SYSTEM, temperature=0,
         messages=[{"role": "user", "content": build_revise_user(claim, result)}],
     )
     text = "".join(getattr(b, "text", "") for b in msg.content
@@ -399,12 +428,14 @@ class _BedrockClient:
             self._rt = rt
 
         def create(self, model, max_tokens, messages, system=None,
-                   tools=None, tool_choice=None, **_):
+                   tools=None, tool_choice=None, temperature=None, **_):
             from types import SimpleNamespace
             body = {"anthropic_version": "bedrock-2023-05-31",
                     "max_tokens": max_tokens, "messages": messages}
             if system is not None:
                 body["system"] = system
+            if temperature is not None:
+                body["temperature"] = temperature
             if tools is not None:
                 body["tools"] = tools
             if tool_choice is not None:
@@ -444,7 +475,7 @@ def judge_claim(claim: str, fetched: dict) -> dict:
         return no_text_result()
     client, model = _client_and_model()
     msg = client.messages.create(
-        model=model, max_tokens=1500, system=_SYSTEM,
+        model=model, max_tokens=1500, system=_SYSTEM, temperature=0,
         tools=[_TOOL], tool_choice={"type": "tool", "name": "report_verdict"},
         messages=[{"role": "user", "content": build_user(claim, fetched)}],
     )
