@@ -841,7 +841,9 @@ function auditHTML(out) {
     const v = c.verdict || "SKIPPED", va = c.verified_against || {};
     const src = va.doi ? `<a href="https://doi.org/${esc(va.doi)}" target="_blank" rel="noopener">${esc(va.title || va.doi)}</a>` : esc(va.title || c.note || "unresolved");
     const why = c.rationale ? `<p class="meta">${esc(c.rationale)}</p>` : "";
-    return `<div class="card ${_AV(v)}"><div><span class="badge ${_AV(v)}">${i + 1}. ${esc(v)}</span></div><p><b>Claim:</b> ${esc(c.claim)}</p><p class="meta">cites: ${src}</p>${why}</div>`;
+    const sg = c.suggestion;
+    const sugline = sg ? `<p class="meta">&rarr; <b>suggested source</b> [${esc(sg.verdict)}]: ${esc(sg.title || sg.doi || "?")}${sg.doi ? ` · <a href="https://doi.org/${esc(sg.doi)}" target="_blank" rel="noopener">${esc(sg.doi)}</a>` : ""}</p>` : "";
+    return `<div class="card ${_AV(v)}"><div><span class="badge ${_AV(v)}">${i + 1}. ${esc(v)}</span></div><p><b>Claim:</b> ${esc(c.claim)}</p><p class="meta">cites: ${src}</p>${why}${sugline}</div>`;
   }).join("");
   return `<div class="scorecard"><div class="big">${esc(p.title || p.doi || p.pmcid || "paper")}</div>
     <p class="meta">${p.doi ? `<a href="https://doi.org/${esc(p.doi)}" target="_blank" rel="noopener">${esc(p.doi)}</a> · ` : ""}introduction · ${summ}</p>
@@ -852,6 +854,7 @@ function auditHTML(out) {
 async function auditPaperFlow() {
   const ref = $("auditRef").value.trim(), key = $("key").value.trim(), model = $("model").value.trim() || "claude-sonnet-5-5";
   const maxClaims = Math.max(1, Math.min(20, parseInt($("auditMax").value) || 8));
+  const doFix = $("auditFix") && $("auditFix").checked;
   if (!ref) { $("auditOut").innerHTML = `<div class="err">Enter a paper DOI / PMID / PMCID.</div>`; return; }
   if (!key) { $("auditOut").innerHTML = `<div class="err">Add your Anthropic API key above.</div>`; return; }
   $("auditBtn").disabled = true; $("auditOut").innerHTML = ""; $("auditStatus").textContent = "Resolving paper…";
@@ -874,6 +877,13 @@ async function auditPaperFlow() {
       const r = await verifyClaim(c.claim, primary.doi, key, model);
       c.verified_against = primary; c.verdict = r.verdict; c.confidence = r.confidence;
       c.rationale = r.rationale; c.has_results = r.has_results;
+      if (doFix && c.verdict !== "SUPPORTED") {
+        $("auditStatus").textContent = `Finding a better source for claim ${i + 1}…`;
+        try {
+          const sg = await suggestSources(c.claim, key, model, 1, primary.doi, 6);
+          c.suggestion = sg.suggested.find(s => s.verdict === "SUPPORTED") || null;
+        } catch (e) { /* non-fatal */ }
+      }
     }
     $("auditStatus").textContent = "";
     $("auditOut").innerHTML = auditHTML({ paper: { title: res.title, doi: res.doi, pmcid: res.pmcid }, claims, paragraphs });

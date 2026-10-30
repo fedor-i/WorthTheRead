@@ -491,26 +491,8 @@ def _keywords(text: str, k: int = 6) -> str:
     return " ".join(terms[:k])
 
 
-@mcp.tool()
-async def suggest_sources(claim: str, n: int = 3, exclude: str = "",
-                          breadth: int = 14, ctx: Context = None) -> dict:
-    """Find real papers that actually SUPPORT a claim — to add a citation, or
-    replace one that doesn't hold up.
-
-    Casts a wide net: discovers candidates across OpenAlex, Crossref, Europe PMC
-    & Semantic Scholar (plus the citation trail) from BOTH the full claim and a
-    keyword-condensed query, merges them, then verifies the claim against each
-    and returns the ones that support it, ranked (SUPPORTED before OVERSTATED,
-    then by confidence). Unlike a single-source checker, this helps you FIX a
-    weak citation, not just flag it — pass the failing DOI as `exclude`.
-
-    Args:
-        claim: the claim to find support for.
-        n: how many supporting sources to return.
-        exclude: a DOI to skip (e.g. the citation that already failed).
-        breadth: how many candidate papers to search/verify (wider = more
-            thorough, more model calls).
-    """
+async def _suggest_sources(claim: str, n: int, exclude: str, breadth: int,
+                           ctx) -> dict:
     skip = (exclude or "").lower().strip().replace("doi:", "")
     cands = _discover.discover_sources(claim, n=breadth)
     seen = {(c.get("doi") or c.get("pmcid") or "").lower() for c in cands}
@@ -547,9 +529,32 @@ async def suggest_sources(claim: str, n: int = 3, exclude: str = "",
 
 
 @mcp.tool()
+async def suggest_sources(claim: str, n: int = 3, exclude: str = "",
+                          breadth: int = 14, ctx: Context = None) -> dict:
+    """Find real papers that actually SUPPORT a claim — to add a citation, or
+    replace one that doesn't hold up.
+
+    Casts a wide net: discovers candidates across OpenAlex, Crossref, Europe PMC
+    & Semantic Scholar (plus the citation trail) from BOTH the full claim and a
+    keyword-condensed query, merges them, then verifies the claim against each
+    and returns the ones that support it, ranked (SUPPORTED before OVERSTATED,
+    then by confidence). Unlike a single-source checker, this helps you FIX a
+    weak citation, not just flag it — pass the failing DOI as `exclude`.
+
+    Args:
+        claim: the claim to find support for.
+        n: how many supporting sources to return.
+        exclude: a DOI to skip (e.g. the citation that already failed).
+        breadth: how many candidate papers to search/verify (wider = more
+            thorough, more model calls).
+    """
+    return await _suggest_sources(claim, n, exclude, breadth, ctx)
+
+
+@mcp.tool()
 async def audit_paper(reference: str, max_claims: int = 8,
                       section: str = "introduc", passes: int = 1,
-                      ctx: Context = None) -> dict:
+                      fix: bool = False, ctx: Context = None) -> dict:
     """Audit a paper's own claims against the sources it cites.
 
     Pulls the paper's full text (Europe PMC JATS), takes a section (the
@@ -569,6 +574,19 @@ async def audit_paper(reference: str, max_claims: int = 8,
 
     out = await _audit.run_audit(reference, vf, max_claims=max_claims,
                                  section=section)
+
+    # Fix step: for each claim its own citation doesn't support, go find one
+    # that does — so the audit hands back a replacement, not just a red flag.
+    if fix and out.get("available"):
+        for c in out.get("claims", []):
+            if c.get("verdict") in ("OVERSTATED", "UNSUPPORTED", "INSUFFICIENT"):
+                cited = (c.get("verified_against") or {}).get("doi", "")
+                sug = await _suggest_sources(c["claim"], 1, cited, 6, ctx)
+                top = next((s for s in sug["suggested"]
+                            if s["verdict"] == "SUPPORTED"), None)
+                if top:  # only offer a genuinely supporting replacement
+                    c["suggestion"] = top
+
     out["card"] = _audit._render(out)
     return out
 

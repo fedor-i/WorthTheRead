@@ -214,6 +214,11 @@ def _render(out):
         lines.append(f"> {c['claim']}")
         if c.get("rationale"):
             lines.append(f"  _{c['rationale'][:200]}_")
+        sug = c.get("suggestion")
+        if sug:
+            sd = f" ([{sug['doi']}](https://doi.org/{sug['doi']}))" if sug.get("doi") else ""
+            lines.append(f"  → **suggested source [{sug.get('verdict')}]:** "
+                         f"{(sug.get('title') or sug.get('doi') or '?')[:80]}{sd}")
     return "\n".join(lines)
 
 
@@ -260,11 +265,19 @@ def render_html(out):
             srcline = (f'<a href="https://doi.org/{_h.escape(srcdoi)}" target="_blank">{srctitle}</a>'
                        if srcdoi else srctitle)
             why = _h.escape(c.get("rationale") or c.get("note") or "")
+            sug = c.get("suggestion")
+            sugline = ""
+            if sug:
+                st = _h.escape(sug.get("title") or sug.get("doi") or "?")
+                sd = (f' (<a href="https://doi.org/{_h.escape(sug["doi"])}" target="_blank">{_h.escape(sug["doi"])}</a>)'
+                      if sug.get("doi") else "")
+                sugline = (f'<div class="src">&rarr; suggested source '
+                           f'[{_h.escape(sug.get("verdict", ""))}]: {st}{sd}</div>')
             rows.append(
                 f'<div class="row" id="c{i}"><span class="badge v-{v}">{v}</span>'
                 f'<div class="rtext"><div class="cl">{i}. {_h.escape(c["claim"])}</div>'
                 f'<div class="src">cites: {srcline}</div>'
-                f'{f"<div class=why>{why}</div>" if why else ""}</div></div>')
+                f'{f"<div class=why>{why}</div>" if why else ""}{sugline}</div></div>')
         detail = "\n".join(rows)
         summ = " · ".join(f'<b class="v-{k}">{k}</b>: {v}' for k, v in out.get("summary", {}).items())
         body = f'<p class="meta">Section: <b>{_h.escape(out.get("section",""))}</b> · {summ}</p>'
