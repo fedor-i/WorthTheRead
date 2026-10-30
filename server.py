@@ -462,6 +462,49 @@ async def revise_claim(claim: str, reference: str, expected_title: str = "",
 
 
 @mcp.tool()
+async def suggest_sources(claim: str, n: int = 3, exclude: str = "",
+                          ctx: Context = None) -> dict:
+    """Find real papers that actually SUPPORT a claim — to add a citation, or
+    replace one that doesn't hold up.
+
+    Discovers candidates across OpenAlex, Crossref, Europe PMC & Semantic Scholar
+    (plus the citation trail), verifies the claim against each, and returns the
+    ones that support it, ranked (SUPPORTED before OVERSTATED, then by
+    confidence). Unlike a single-source checker, this helps you FIX a weak
+    citation, not just flag it — pass the failing DOI as `exclude`.
+
+    Args:
+        claim: the claim to find support for.
+        n: how many supporting sources to return.
+        exclude: a DOI to skip (e.g. the citation that already failed).
+    """
+    skip = (exclude or "").lower().strip().replace("doi:", "")
+    cands = _discover.discover_sources(claim, n=n + 8)
+    found, checked = [], 0
+    for c in cands:
+        ref = c.get("doi") or c.get("pmcid")
+        if not ref or ref.lower() == skip or checked >= n + 7:
+            continue
+        checked += 1
+        r = await _verify(claim, ref, ctx=ctx)
+        if r.get("verdict") in ("SUPPORTED", "OVERSTATED"):
+            res = r.get("resolved") or {}
+            found.append({
+                "doi": c.get("doi"), "pmcid": c.get("pmcid"),
+                "title": res.get("title") or c.get("title"),
+                "year": res.get("year") or c.get("year"), "venue": c.get("venue"),
+                "verdict": r.get("verdict"), "confidence": r.get("confidence"),
+                "has_results": r.get("has_results"),
+            })
+        if sum(1 for x in found if x["verdict"] == "SUPPORTED") >= n:
+            break
+    found.sort(key=lambda x: (x["verdict"] != "SUPPORTED", -(x["confidence"] or 0)))
+    found = found[:n + 2]
+    return {"claim": claim, "checked": checked, "count": len(found),
+            "suggested": found}
+
+
+@mcp.tool()
 async def audit_paper(reference: str, max_claims: int = 8,
                       section: str = "introduc", passes: int = 1,
                       ctx: Context = None) -> dict:
