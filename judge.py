@@ -379,9 +379,48 @@ def parse_json_verdict(raw_text: str, fetched: dict) -> dict:
 
 # --- api / bedrock backend (fallback when sampling is unavailable) ----------
 
+class _BedrockClient:
+    """Minimal Bedrock transport over boto3, exposing the one method the judge
+    uses (`messages.create`). We call bedrock-runtime InvokeModel directly and
+    set `anthropic_version: bedrock-2023-05-31` ourselves, rather than go through
+    anthropic's AnthropicBedrock — which (as of SDK 2.3.0) sends a dated API
+    version Bedrock rejects with "Invalid API version". boto3 picks up either a
+    Bedrock API key (AWS_BEARER_TOKEN_BEDROCK) or the standard credential chain.
+    """
+
+    def __init__(self, region):
+        import boto3
+        self._rt = boto3.client("bedrock-runtime", region_name=region)
+
+    class _Messages:
+        def __init__(self, rt):
+            self._rt = rt
+
+        def create(self, model, max_tokens, messages, system=None,
+                   tools=None, tool_choice=None, **_):
+            from types import SimpleNamespace
+            body = {"anthropic_version": "bedrock-2023-05-31",
+                    "max_tokens": max_tokens, "messages": messages}
+            if system is not None:
+                body["system"] = system
+            if tools is not None:
+                body["tools"] = tools
+            if tool_choice is not None:
+                body["tool_choice"] = tool_choice
+            resp = self._rt.invoke_model(modelId=model, body=json.dumps(body))
+            data = json.loads(resp["body"].read())
+            content = [SimpleNamespace(type=b.get("type"), input=b.get("input"),
+                                       text=b.get("text"), name=b.get("name"))
+                       for b in data.get("content", [])]
+            return SimpleNamespace(content=content)
+
+    @property
+    def messages(self):
+        return _BedrockClient._Messages(self._rt)
+
+
 def _client_and_model():
     if config.USE_BEDROCK:
-        from anthropic import AnthropicBedrock
         if not config.BEDROCK_MODEL:
             raise RuntimeError(
                 "WYR_USE_BEDROCK is set but WYR_BEDROCK_MODEL is empty. Set it "
@@ -389,7 +428,7 @@ def _client_and_model():
                 "with: aws bedrock list-foundation-models --by-provider anthropic).")
         if config.AWS_PROFILE:
             os.environ.setdefault("AWS_PROFILE", config.AWS_PROFILE)
-        return AnthropicBedrock(aws_region=config.AWS_REGION), config.BEDROCK_MODEL
+        return _BedrockClient(config.AWS_REGION), config.BEDROCK_MODEL
 
     from anthropic import Anthropic
     if not os.environ.get("ANTHROPIC_API_KEY"):
