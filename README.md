@@ -46,11 +46,16 @@ and drop `WYR_USE_BEDROCK`.
   `{claim, reference}`. Verifies each, then returns an overall confidence score
   and a ranked **"worth your read"** source list; `min_confidence` screens out
   sources below your bar.
-- **`find_sources(query, limit=3, scope="", peer_reviewed_only=False)`** —
-  discover real papers for a query across OpenAlex, Crossref & Europe PMC in
-  parallel, deduped by DOI and trust-ranked (provider agreement, query-match
-  rank, citations, recency, open access, evidence tier). A leading `!bang`
-  (`!oa` / `!crossref` / `!epmc` / `!pubmed`) scopes it to one provider.
+- **`find_sources(query, limit=3, scope="", peer_reviewed_only=False,
+  iterative=True)`** — discover real papers for a query across OpenAlex,
+  Crossref & Europe PMC in parallel, deduped by DOI and trust-ranked (provider
+  agreement, query-match rank, citations, recency, open access, evidence tier).
+  Iterative (round 2) follows the **citation trail** of the strongest hits —
+  the works they reference plus OpenAlex related works — and folds in papers
+  **co-cited by several seeds**, lifting recall on complex questions while the
+  order stays deterministic. Retracted papers are dropped. Each source is
+  flagged with `cocite` and `via_trail`. A leading `!bang` (`!oa` / `!crossref`
+  / `!epmc` / `!pubmed`) scopes it to one provider.
 - **`revise_claim(claim, reference, max_rounds=2, broaden=True, want=2)`** —
   the self-improvement loop. Verifies the claim, then each round **revises** it
   (if OVERSTATED/UNSUPPORTED) to match the evidence and **broadens** it by
@@ -65,7 +70,7 @@ and drop `WYR_USE_BEDROCK`.
 
 | Stage | Source |
 | --- | --- |
-| Discover sources | OpenAlex + Crossref + Europe PMC (parallel, keyless), deduped by DOI + trust-ranked |
+| Discover sources | OpenAlex + Crossref + Europe PMC (parallel, keyless) + citation-trail round, deduped by DOI, trust-ranked, retractions dropped |
 | Resolve link + retraction check | Crossref (`updated-by` field) + NCBI ID Converter |
 | Fetch real results | PMC BioC JSON (section-tagged); Europe PMC abstract fallback |
 | Judge | Claude (forced structured output) |

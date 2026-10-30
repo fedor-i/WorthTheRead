@@ -242,30 +242,42 @@ async def _strengthen(claim: str, existing: list, want: int, ctx) -> list:
 
 @mcp.tool()
 def find_sources(query: str, limit: int = 3, scope: str = "",
-                 peer_reviewed_only: bool = False,
+                 peer_reviewed_only: bool = False, iterative: bool = True,
                  ctx: Context = None) -> dict:
     """Discover real papers for a query across OpenAlex, Crossref & Europe PMC.
 
-    Fans out to all three (keyless), dedupes by DOI, and trust-ranks the
+    Round 1 fans out to all three (keyless), dedupes by DOI, and trust-ranks the
     candidates by a pure function of explicit signals — provider agreement,
-    query-match rank, citations, recency, open access, and evidence tier — so
-    the same query always yields the same order. Feed the returned DOIs into
-    verify_claim / score_answer, or let revise_claim pull them automatically.
+    query-match rank, citations, recency, open access, evidence tier. Round 2
+    (iterative=True) follows the citation trail of the strongest hits — the
+    papers they reference and OpenAlex's related works — and folds in those
+    co-cited by several seeds, lifting recall on complex questions the way an
+    agent-style search does, while the order stays deterministic. Retracted
+    papers are dropped. Feed the returned DOIs into verify_claim / score_answer,
+    or let revise_claim pull them automatically.
+
+    Each source is flagged with the providers that found it ("openalex-cite"
+    means it came from the citation trail), its `cocite` count (how many seeds
+    cited it), and `via_trail`.
 
     Args:
         query: a few keywords describing the claim or topic. A leading !bang
             scopes it to one provider: !oa, !crossref, !epmc, !pubmed.
         limit: how many ranked candidates to return.
-        scope: force a single provider ("openalex" / "crossref" / "epmc").
+        scope: force a single provider ("openalex" / "crossref" / "epmc"); this
+            also skips the citation trail.
         peer_reviewed_only: drop preprints (bioRxiv/medRxiv/arXiv).
+        iterative: follow the citation trail for higher recall (default True).
     """
     cands = _discover.discover_sources(
         query, n=max(1, limit), scope=(scope or None),
-        peer_reviewed_only=peer_reviewed_only)
+        peer_reviewed_only=peer_reviewed_only, rounds=(2 if iterative else 1))
     sources = [{
         "doi": c.get("doi"), "pmcid": c.get("pmcid"), "pmid": c.get("pmid"),
         "title": c.get("title"), "year": c.get("year"), "venue": c.get("venue"),
         "citations": c.get("citations"), "providers": c.get("providers"),
+        "cocite": c.get("cocite", 0),
+        "via_trail": c.get("providers") == ["openalex-cite"],
         "open_access": c.get("is_oa"), "trust_score": round(c.get("_score", 0), 2),
     } for c in cands]
     return {"query": query, "count": len(sources), "sources": sources}

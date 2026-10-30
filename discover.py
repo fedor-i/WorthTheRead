@@ -1,11 +1,19 @@
-"""Multi-provider source discovery — the Python port of docs/app.js.
+"""Multi-provider, iterative source discovery — the Python port of the site's
+discovery, extended with citation-trail following.
 
-Fan out to OpenAlex + Crossref + Europe PMC in parallel (all keyless), dedupe
-candidates by DOI, merge their metadata, and rank by a pure function of
-explicit trust signals (provider agreement, query-match rank, citations,
-recency, open access, evidence tier) — so the same query always yields the
-same order (auditable). Used by the self-improvement loop to find corroborating
-papers for a claim, and exposed as a standalone MCP tool.
+Round 1 fans out to OpenAlex + Crossref + Europe PMC in parallel (all keyless),
+dedupes candidates by DOI, merges their metadata, and ranks by a pure function
+of explicit trust signals. Round 2 (optional, default on) follows the citation
+trail of the strongest round-1 hits — the papers they reference and OpenAlex's
+related-works — and folds those in, rewarding co-citation (a paper pointed to
+by several strong seeds). This lifts recall on complex questions the way an
+iterative, agent-style search does, while the ranking stays deterministic and
+auditable.
+
+Retraction-aware: OpenAlex's `is_retracted` flag is carried through discovery,
+and retracted papers are dropped from results by default — a discovery tool
+should never recommend a retracted source (verify_claim still does the
+authoritative Crossref / Retraction Watch check at verification time).
 
 Every network call is best-effort: a provider that errors or rate-limits
 contributes nothing rather than failing the whole search.
@@ -24,6 +32,11 @@ EPMC = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
 _REVIEW_RE = re.compile(r"review|meta-analysis|meta analysis", re.I)
 _PREPRINT_RE = re.compile(r"preprint|biorxiv|medrxiv|arxiv|posted-content", re.I)
 _BANG_RE = re.compile(r"(?:^|\s)(![a-z]+)\b", re.I)
+
+# Fields we pull from OpenAlex works (round 1 and citation-trail fetch alike).
+_OA_SELECT = ("id,doi,display_name,title,publication_year,primary_location,"
+              "cited_by_count,type,open_access,is_retracted,ids,"
+              "referenced_works,related_works")
 
 # DuckDuckGo-style !bang: scope a query to one provider.
 BANGS = {
@@ -54,24 +67,31 @@ def _get_json(url, params):
     return r.json()
 
 
+def _oa_candidate(w, provider, rank):
+    ids = w.get("ids") or {}
+    pmid = ids.get("pmid").split("/")[-1] if ids.get("pmid") else None
+    loc = (w.get("primary_location") or {}).get("source") or {}
+    oa = w.get("open_access") or {}
+    return {
+        "doi": clean_doi(w.get("doi")), "pmcid": None, "pmid": pmid,
+        "title": w.get("display_name") or w.get("title"),
+        "year": w.get("publication_year"),
+        "venue": loc.get("display_name"),
+        "citations": w.get("cited_by_count") or 0,
+        "type": w.get("type") or "", "is_oa": bool(oa.get("is_oa")),
+        "retracted": bool(w.get("is_retracted")),
+        "provider": provider, "rank": rank, "cocite": 0,
+        "_oaid": (w.get("id") or "").split("/")[-1] or None,
+        "_refs": w.get("referenced_works") or [],
+        "_related": w.get("related_works") or [],
+    }
+
+
 def _openalex_search(query, n):
-    j = _get_json(OPENALEX, {"search": query, "per_page": n})
-    out = []
-    for i, w in enumerate(j.get("results") or []):
-        ids = w.get("ids") or {}
-        pmid = ids.get("pmid").split("/")[-1] if ids.get("pmid") else None
-        loc = (w.get("primary_location") or {}).get("source") or {}
-        oa = w.get("open_access") or {}
-        out.append({
-            "doi": clean_doi(w.get("doi")), "pmcid": None, "pmid": pmid,
-            "title": w.get("display_name") or w.get("title"),
-            "year": w.get("publication_year"),
-            "venue": loc.get("display_name"),
-            "citations": w.get("cited_by_count") or 0,
-            "type": w.get("type") or "", "is_oa": bool(oa.get("is_oa")),
-            "provider": "openalex", "rank": i,
-        })
-    return out
+    j = _get_json(OPENALEX, {"search": query, "per_page": n,
+                             "select": _OA_SELECT})
+    return [_oa_candidate(w, "openalex", i)
+            for i, w in enumerate(j.get("results") or [])]
 
 
 def _crossref_search(query, n):
@@ -88,8 +108,8 @@ def _crossref_search(query, n):
             "title": (m.get("title") or [None])[0], "year": year,
             "venue": (m.get("container-title") or [None])[0],
             "citations": m.get("is-referenced-by-count") or 0,
-            "type": m.get("type") or "", "is_oa": False,
-            "provider": "crossref", "rank": i,
+            "type": m.get("type") or "", "is_oa": False, "retracted": False,
+            "provider": "crossref", "rank": i, "cocite": 0,
         })
     return out
 
@@ -98,22 +118,40 @@ def _epmc_search(query, n):
     j = _get_json(EPMC, {"query": query, "format": "json",
                          "resultType": "lite", "pageSize": n})
     out = []
-    results = (j.get("resultList") or {}).get("result") or []
-    for i, r in enumerate(results):
+    for i, r in enumerate((j.get("resultList") or {}).get("result") or []):
         out.append({
             "doi": clean_doi(r.get("doi")), "pmcid": r.get("pmcid"),
             "pmid": r.get("pmid"), "title": r.get("title"),
             "year": int(r["pubYear"]) if r.get("pubYear") else None,
             "venue": r.get("journalTitle"),
             "citations": r.get("citedByCount") or 0,
-            "type": r.get("pubType") or "", "is_oa": r.get("isOpenAccess") == "Y",
-            "provider": "epmc", "rank": i,
+            "type": r.get("pubType") or "",
+            "is_oa": r.get("isOpenAccess") == "Y", "retracted": False,
+            "provider": "epmc", "rank": i, "cocite": 0,
         })
     return out
 
 
 PROVIDERS = {"openalex": _openalex_search, "crossref": _crossref_search,
              "epmc": _epmc_search}
+
+
+def _openalex_fetch_ids(short_ids, cocite):
+    """Batch-fetch OpenAlex works by id (the citation-trail candidates).
+    `cocite` maps a short id -> how many seeds pointed at it."""
+    out = []
+    for i in range(0, len(short_ids), 50):      # OR filter takes up to 50 ids
+        chunk = short_ids[i:i + 50]
+        try:
+            j = _get_json(OPENALEX, {"filter": "openalex_id:" + "|".join(chunk),
+                                     "per_page": 50, "select": _OA_SELECT})
+        except Exception:
+            continue
+        for w in j.get("results") or []:
+            c = _oa_candidate(w, "openalex-cite", 99)
+            c["cocite"] = cocite.get((w.get("id") or "").split("/")[-1], 1)
+            out.append(c)
+    return out
 
 
 def _merge_candidates(lists):
@@ -139,15 +177,22 @@ def _merge_candidates(lists):
             m["citations"] = max(m["citations"] or 0, c["citations"] or 0)
             m["type"] = m["type"] or c["type"]
             m["is_oa"] = m["is_oa"] or c["is_oa"]
+            m["retracted"] = m.get("retracted") or c.get("retracted")
+            m["cocite"] = max(m.get("cocite") or 0, c.get("cocite") or 0)
+            for k in ("_oaid", "_refs", "_related"):
+                if c.get(k) and not m.get(k):
+                    m[k] = c[k]
     return list(by_key.values())
 
 
 def _trust_score(c):
     import math
     s = 0.0
-    s += len(c.get("providers") or [1]) * 3          # agreement across providers
+    kw_providers = [p for p in (c.get("providers") or []) if p != "openalex-cite"]
+    s += len(kw_providers) * 3                        # keyword agreement across providers
     rank = c["bestRank"] if c.get("bestRank") is not None else 9
     s += max(0, 6 - rank)                             # query-match (top of a list)
+    s += min(c.get("cocite") or 0, 4) * 2.5           # co-cited by strong seeds
     s += math.log10((c.get("citations") or 0) + 1) * 2   # impact
     if c.get("year"):
         s += max(0, c["year"] - 2000) * 0.05          # mild recency tilt
@@ -160,12 +205,39 @@ def _trust_score(c):
     return s
 
 
-def discover_sources(raw_query, n=3, scope=None, peer_reviewed_only=False):
+def _sort_key(c):
+    # Retracted papers always sort last (defense-in-depth even when a caller
+    # asks to include them), then by trust score, then a stable id tiebreak.
+    return (bool(c.get("retracted")), -c["_score"],
+            str(c.get("doi") or c.get("pmcid")))
+
+
+def _citation_trail(ranked, seed_k):
+    """Collect citation-trail ids (referenced + related works) from the top
+    `seed_k` OpenAlex-backed hits, counting how many seeds point at each."""
+    cocite = {}
+    for c in ranked[:seed_k]:
+        if not c.get("_oaid"):
+            continue
+        seen = set()
+        for oid in (c.get("_refs") or []) + (c.get("_related") or []):
+            sid = (oid or "").split("/")[-1]
+            if sid and sid not in seen:
+                seen.add(sid)
+                cocite[sid] = cocite.get(sid, 0) + 1
+    return cocite
+
+
+def discover_sources(raw_query, n=3, scope=None, peer_reviewed_only=False,
+                     rounds=2, include_retracted=False):
     """Discover up to `n` candidate sources for a query, trust-ranked.
 
-    Honors a leading !bang (!oa / !crossref / !epmc / !pubmed) to scope the
-    search to a single provider. Returns a list of candidate dicts, each with
-    doi/pmcid/pmid/title/year/venue/citations/providers and a `_score`.
+    rounds=1 is the original one-shot keyword search. rounds>=2 (default) also
+    follows the citation trail of the top keyword hits to lift recall. A leading
+    !bang (!oa / !crossref / !epmc / !pubmed) scopes round 1 to one provider and
+    skips the trail. Retracted papers are dropped unless include_retracted=True.
+    Returns candidate dicts with doi/pmcid/pmid/title/year/venue/citations/
+    providers/retracted plus a `_score`.
     """
     query = (raw_query or "").strip()
     m = _BANG_RE.search(query)
@@ -187,10 +259,29 @@ def discover_sources(raw_query, n=3, scope=None, peer_reviewed_only=False):
     with ThreadPoolExecutor(max_workers=len(names)) as ex:
         lists = list(ex.map(_safe, names))
 
-    cands = [c for c in _merge_candidates(lists) if c.get("doi") or c.get("pmcid")]
-    if peer_reviewed_only:
-        cands = [c for c in cands if not _PREPRINT_RE.search(c.get("type") or "")]
+    cands = _merge_candidates(lists)
     for c in cands:
         c["_score"] = _trust_score(c)
-    cands.sort(key=lambda c: (-c["_score"], str(c.get("doi") or c.get("pmcid"))))
+    cands.sort(key=_sort_key)
+
+    # Round 2: follow the citation trail of the strongest OpenAlex hits.
+    if rounds >= 2 and not scope and "openalex" in names:
+        cocite = _citation_trail(cands, seed_k=min(4, len(cands)))
+        # Require co-citation by >=2 seeds: a paper only one seed points at is
+        # weak signal and the main source of topic drift (the citation analog
+        # of provider agreement). Strongest signal first, capped.
+        ids = sorted((k for k, v in cocite.items() if v >= 2),
+                     key=lambda k: -cocite[k])[:50]
+        if ids:
+            trail = _openalex_fetch_ids(ids, cocite)
+            cands = _merge_candidates(lists + [trail])
+            for c in cands:
+                c["_score"] = _trust_score(c)
+            cands.sort(key=_sort_key)
+
+    cands = [c for c in cands if c.get("doi") or c.get("pmcid")]
+    if not include_retracted:
+        cands = [c for c in cands if not c.get("retracted")]
+    if peer_reviewed_only:
+        cands = [c for c in cands if not _PREPRINT_RE.search(c.get("type") or "")]
     return cands[:n]
