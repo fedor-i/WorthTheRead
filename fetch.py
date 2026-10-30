@@ -414,13 +414,28 @@ def _epmc_core(resolved: dict) -> dict:
         return {}
 
 
+_FETCH_CACHE = {}
+
+
+def clear_cache():
+    _FETCH_CACHE.clear()
+
+
 def fetch_text(resolved: dict) -> dict:
     """Given a resolved reference, return the paper text we could obtain.
 
     Returns: {sections: {bucket: text}, sections_available: [..],
               has_results(bool), open_access(bool), source: str,
               full_text: str (capped, priority order)}.
+
+    Cached per process by DOI/PMCID: the same paper always returns the same
+    text within a run (deterministic across self-consistency passes and repeated
+    citations in an audit, and faster), instead of varying with which flaky OA
+    endpoint happened to answer.
     """
+    key = (resolved.get("doi") or resolved.get("pmcid") or "").lower()
+    if key and key in _FETCH_CACHE:
+        return _FETCH_CACHE[key]
     out = {"sections": {}, "sections_available": [], "has_results": False,
            "open_access": False, "source": "none", "full_text": ""}
 
@@ -523,4 +538,6 @@ def fetch_text(resolved: dict) -> dict:
         if budget <= 0:
             break
     out["full_text"] = "".join(parts).strip()
+    if key:
+        _FETCH_CACHE[key] = out
     return out

@@ -336,10 +336,14 @@ def _derive_from_aspects(checked: list):
         verdict = "SUPPORTED"
     elif core_ok:
         verdict = "OVERSTATED"
-    elif not core:
-        verdict = "SUPPORTED" if all_entailed else "INSUFFICIENT"
     else:
-        verdict = "INSUFFICIENT"
+        # Some aspects established but not all — e.g. a compound claim whose one
+        # conjunct is supported and another is absent: the claim asserts more
+        # than the text shows, so it OVERSTATES. Nothing established at all is
+        # INSUFFICIENT (the text simply doesn't address the claim).
+        verdict = ("OVERSTATED"
+                   if any(a["status"] == "ENTAILED" for a in checked)
+                   else "INSUFFICIENT")
     unmet = [f"{a['type']}{(' — ' + a['text']) if a['text'] else ''} "
              "(not established in the text)"
              for a in checked if a["status"] == "ABSENT"]
