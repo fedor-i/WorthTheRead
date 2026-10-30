@@ -15,6 +15,7 @@ _PMCID_RE = re.compile(r"PMC\d{5,9}", re.I)
 
 CROSSREF = "https://api.crossref.org/works/{doi}"
 IDCONV = "https://www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/"
+BIORXIV_API = "https://api.biorxiv.org/details/{server}/{doi}"
 
 
 def _headers():
@@ -119,6 +120,59 @@ def _retraction(msg: dict) -> dict:
     return flags
 
 
+def _biorxiv_published(doi: str) -> str:
+    """The published-journal DOI for a bioRxiv/medRxiv preprint, via their API's
+    `published` field, or None if it hasn't been published (or isn't linked)."""
+    for server in ("biorxiv", "medrxiv"):
+        try:
+            r = requests.get(BIORXIV_API.format(server=server, doi=doi),
+                             headers=_headers(), timeout=config.HTTP_TIMEOUT)
+            coll = r.json().get("collection") or []
+            pub = (coll[-1].get("published") if coll else None) or ""
+            if pub and pub.upper() != "NA":
+                return pub
+        except Exception:
+            pass
+    return None
+
+
+def _journal_meta(doi: str) -> dict:
+    """Minimal journal metadata for a (published) DOI."""
+    try:
+        m = _crossref(doi)
+        return {"doi": doi, "journal": (m.get("container-title") or [None])[0],
+                "year": _year(m), "type": m.get("type")}
+    except Exception:
+        return {"doi": doi, "journal": None, "year": None, "type": None}
+
+
+def _relation_doi(msg: dict, key: str) -> str:
+    for rel in (msg.get("relation") or {}).get(key, []) or []:
+        if (rel.get("id-type") or "").lower() == "doi" and rel.get("id"):
+            return rel["id"]
+    return None
+
+
+def _preprint_links(out: dict, msg: dict) -> None:
+    """Fill is_preprint / published_as / has_preprint on `out`.
+
+    A cited preprint that later cleared peer review at a journal is more
+    trustworthy; one that never did is a mild caution. The reverse link (a
+    journal article's originating preprint) is reported when the data has it."""
+    doi = (out.get("doi") or "")
+    ctype = (msg.get("type") or "").lower()
+    out["is_preprint"] = ("posted-content" in ctype) or doi.startswith("10.1101/")
+    if out["is_preprint"]:
+        pub_doi = _biorxiv_published(doi) if doi.startswith("10.1101/") else None
+        pub_doi = pub_doi or _relation_doi(msg, "is-preprint-of")
+        if pub_doi:
+            out["published_as"] = _journal_meta(pub_doi)
+    else:
+        pre_doi = _relation_doi(msg, "has-preprint")
+        if pre_doi:
+            out["has_preprint"] = {"doi": pre_doi}
+
+
 def resolve(reference: str, expected_title: str = None) -> dict:
     """Resolve a reference to metadata + retraction status.
 
@@ -132,6 +186,7 @@ def resolve(reference: str, expected_title: str = None) -> dict:
         "title": None, "authors": None, "year": None, "journal": None,
         "doi": ids["doi"], "pmcid": ids["pmcid"], "pmid": ids["pmid"],
         "retracted": False, "concern": False, "notices": [],
+        "is_preprint": False, "published_as": None, "has_preprint": None,
         "title_match": None, "error": None,
     }
 
@@ -162,6 +217,7 @@ def resolve(reference: str, expected_title: str = None) -> dict:
     out["year"] = _year(msg)
     out["journal"] = (msg.get("container-title") or [None])[0]
     out.update(_retraction(msg))
+    _preprint_links(out, msg)
 
     # Optional sanity check: does the resolved title match what was claimed?
     if expected_title and out["title"]:

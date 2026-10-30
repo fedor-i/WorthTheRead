@@ -26,6 +26,18 @@ def render_card(r: dict) -> str:
     status.append("full text ✓" if r.get("has_results")
                   else "abstract only ⚠")
     lines.append(" · ".join(status))
+
+    # Preprint <-> published-journal linkage: peer-review status is a trust cue.
+    pub = r.get("published_as")
+    if pub and pub.get("journal"):
+        yr = f" ({pub['year']})" if pub.get("year") else ""
+        link = f" ([{pub['doi']}](https://doi.org/{pub['doi']}))" if pub.get("doi") else ""
+        lines.append(f"📄 preprint — later published in *{pub['journal']}*{yr}{link}")
+    elif r.get("is_preprint"):
+        lines.append("📄 preprint — no peer-reviewed journal version found yet")
+    elif r.get("has_preprint") and r["has_preprint"].get("doi"):
+        d = r["has_preprint"]["doi"]
+        lines.append(f"📄 has a preprint ([{d}](https://doi.org/{d}))")
     lines.append("")
 
     lines.append(f"**Claim:** {r.get('claim', '')}")
