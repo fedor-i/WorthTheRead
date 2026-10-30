@@ -15,6 +15,7 @@ guard runs regardless of backend.
 
 Run (stdio):  python -m worth_your_read.server
 """
+import re
 from collections import Counter
 
 from mcp.server.fastmcp import Context, FastMCP
@@ -461,29 +462,70 @@ async def revise_claim(claim: str, reference: str, expected_title: str = "",
     }
 
 
+_STOP = set(
+    "a an the of in on for to and or but with without is are was were be been "
+    "being this that these those by from as at into than then so not no any all "
+    "can could may might also more most using used use via per between within "
+    "across their its it they we our new recent here show shows showed suggest "
+    "suggests found find results result study paper enables enable enabling "
+    "provides provide providing protects protect protecting acts act acting "
+    "plays play role roles function functions mechanism mechanisms process "
+    "processes reaction centre center effect effects increase increases reduce "
+    "reduces improve improves associated related secondary primary pathway "
+    "pathways involved involves".split())
+
+
+def _keywords(text: str, k: int = 6) -> str:
+    """A broader keyword query from a claim — the full sentence is often too
+    specific to retrieve well. Keep the most DISTINCTIVE terms (hyphenated /
+    numeric / longer are more technical) and only a few of them, so this query
+    casts a different, wider net than the claim itself."""
+    seen, terms = set(), []
+    for w in re.findall(r"[A-Za-z][A-Za-z0-9-]{2,}", (text or "").lower()):
+        if w in _STOP or w in seen:
+            continue
+        seen.add(w)
+        terms.append(w)
+    terms.sort(key=lambda w: ("-" in w or any(c.isdigit() for c in w), len(w)),
+               reverse=True)
+    return " ".join(terms[:k])
+
+
 @mcp.tool()
 async def suggest_sources(claim: str, n: int = 3, exclude: str = "",
-                          ctx: Context = None) -> dict:
+                          breadth: int = 14, ctx: Context = None) -> dict:
     """Find real papers that actually SUPPORT a claim — to add a citation, or
     replace one that doesn't hold up.
 
-    Discovers candidates across OpenAlex, Crossref, Europe PMC & Semantic Scholar
-    (plus the citation trail), verifies the claim against each, and returns the
-    ones that support it, ranked (SUPPORTED before OVERSTATED, then by
-    confidence). Unlike a single-source checker, this helps you FIX a weak
-    citation, not just flag it — pass the failing DOI as `exclude`.
+    Casts a wide net: discovers candidates across OpenAlex, Crossref, Europe PMC
+    & Semantic Scholar (plus the citation trail) from BOTH the full claim and a
+    keyword-condensed query, merges them, then verifies the claim against each
+    and returns the ones that support it, ranked (SUPPORTED before OVERSTATED,
+    then by confidence). Unlike a single-source checker, this helps you FIX a
+    weak citation, not just flag it — pass the failing DOI as `exclude`.
 
     Args:
         claim: the claim to find support for.
         n: how many supporting sources to return.
         exclude: a DOI to skip (e.g. the citation that already failed).
+        breadth: how many candidate papers to search/verify (wider = more
+            thorough, more model calls).
     """
     skip = (exclude or "").lower().strip().replace("doi:", "")
-    cands = _discover.discover_sources(claim, n=n + 8)
+    cands = _discover.discover_sources(claim, n=breadth)
+    seen = {(c.get("doi") or c.get("pmcid") or "").lower() for c in cands}
+    kw = _keywords(claim)
+    if kw and kw.lower() != claim.lower():
+        for c in _discover.discover_sources(kw, n=breadth):
+            key = (c.get("doi") or c.get("pmcid") or "").lower()
+            if key and key not in seen:
+                seen.add(key)
+                cands.append(c)
+    cands.sort(key=lambda c: -(c.get("_score") or 0))
     found, checked = [], 0
     for c in cands:
         ref = c.get("doi") or c.get("pmcid")
-        if not ref or ref.lower() == skip or checked >= n + 7:
+        if not ref or ref.lower() == skip or checked >= breadth:
             continue
         checked += 1
         r = await _verify(claim, ref, ctx=ctx)
