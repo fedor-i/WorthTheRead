@@ -16,10 +16,18 @@ space. The primitives:
 | Benchmark | Their task | Our primitive | Label mapping | Status |
 |---|---|---|---|---|
 | **SciFact** | claim vs abstract → SUPPORT/CONTRADICT/NOINFO | judge on supplied text | SUPPORTED→SUPPORT, UNSUPPORTED→CONTRADICT, INSUFFICIENT/OVERSTATED→NOINFO | **implemented** (`scifact.py`) |
+| **CiteAudit / CiteCheck** | is a reference real or fabricated/corrupted? | resolve / integrity | resolved & citation_ok & not retracted → valid; else hallucinated/invalid | **implemented** (`citation_integrity.py`) |
+| **CiteME** | find the paper a claim cites | discovery (`find_sources`) | gold DOI in top-k candidates → hit; score recall@k | **implemented** (`citeme.py`) |
 | **DeSpin / spin** | is an RCT abstract's conclusion spin? | judge: claim = stated conclusion, text = results section | OVERSTATED (esp. distortion=effect_size_spin) → spin; SUPPORTED → no spin | planned |
 | **ALCE** | is each generated statement supported by its cited passage? | judge on supplied text, per (statement, passage) | SUPPORTED → citation supported; else not | planned |
-| **CiteAudit / CiteCheck** | is a reference real or fabricated/corrupted? | resolve / integrity | resolved & citation_ok & not retracted → valid; else hallucinated/invalid | planned |
-| **CiteME** | find the paper a claim cites | discovery (`find_sources`) | gold DOI in top-k candidates → hit; score recall@k | planned |
+
+Early numbers (seed sets, not the benchmarks' full released data): SciFact
+oracle-label 67% zero-shot (Sonnet 4.5) with SUPPORT precision 1.00 / recall
+0.33 — the tool's conservatism, measured. Citation-integrity 100% (18/18) on
+fully-fabricated-vs-real (the subtle metadata-corruption subset would be
+harder). CiteME find-the-source via discovery: recall@5 90%, MRR 0.72 on
+well-known papers (easier than CiteME's obscure-ML-paper set — drop their
+excerpts into ITEMS for the real number).
 
 Each adapter downloads its own data on demand into `scifact_data/` etc.
 (git-ignored) and is runnable as `python -m worth_your_read.benchmark.adapters.<name>`.
