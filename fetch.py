@@ -8,6 +8,7 @@ reader) never mistake an abstract-only check for a results-level one.
 import re
 import time
 import xml.etree.ElementTree as ET
+from html import unescape as _unescape
 
 import requests
 
@@ -122,24 +123,127 @@ def _from_epmc_fulltext(pmcid: str) -> dict:
     return {k: "\n".join(v) for k, v in sections.items()}
 
 
-def _epmc_abstract(resolved: dict) -> str:
-    """Last-resort abstract from Europe PMC (covers most of PubMed)."""
+BIORXIV = "https://www.{server}.org/content/{doi}v{ver}.full"
+ARXIV_HTML = "https://arxiv.org/html/{aid}"
+AR5IV = "https://ar5iv.labs.arxiv.org/html/{aid}"
+_ARXIV_ID_RE = r"([a-z\-]+(?:\.[A-Za-z]{2})?/\d{7}|\d{4}\.\d{4,5})(v\d+)?"
+
+
+def _html_to_text(html: str) -> str:
+    html = re.sub(r"(?is)<(script|style|noscript|head)[^>]*>.*?</\1>", " ", html)
+    return _strip(re.sub(r"(?s)<[^>]+>", " ", _unescape(html)))
+
+
+def _from_html_sections(html: str) -> dict:
+    """Split server-rendered article HTML into section buckets by its headings.
+    Used for preprint full text (bioRxiv/medRxiv), which PMC rarely carries.
+
+    A heading that names a known section (Results, Methods, ...) sets the
+    current bucket; descriptive sub-headings (e.g. "Sequence changes in X") map
+    to "other" and are left to inherit the enclosing section, so results text
+    under a named subsection still counts as results."""
+    html = re.sub(r"(?is)<(script|style|noscript|head)[^>]*>.*?</\1>", " ", html)
+    parts = re.split(r"(?is)(<h[1-4][^>]*>.*?</h[1-4]>)", html)
+    sections, current = {}, "other"
+    for tok in parts:
+        mh = re.match(r"(?is)^\s*<h[1-4][^>]*>(.*?)</h[1-4]>\s*$", tok)
+        if mh:
+            head = _strip(re.sub(r"(?s)<[^>]+>", " ", _unescape(mh.group(1))))
+            bucket = _bucket_from_title(head)
+            if bucket != "other":
+                current = bucket
+            continue
+        txt = _html_to_text(tok)
+        if txt and len(txt) > 40:
+            sections.setdefault(current, []).append(txt)
+    return {k: "\n".join(v) for k, v in sections.items()}
+
+
+def _usable_fulltext(secs: dict) -> bool:
+    """Accept parsed HTML as real full text: an evidence-bearing section, or
+    enough body prose (arXiv CS/physics papers often label it Evaluation /
+    Experiments rather than Results)."""
+    if not secs:
+        return False
+    if any(secs.get(b) for b in ("results", "discussion", "conclusion", "methods")):
+        return True
+    return sum(len(v) for k, v in secs.items() if k != "title") >= 3000
+
+
+def _biorxiv_fulltext(resolved: dict) -> dict:
+    """Full text for a bioRxiv / medRxiv preprint (DOI prefix 10.1101), served
+    as server-rendered HTML — no PMC version needed. Single-shot requests (these
+    servers rate-limit aggressively, so no retry loop and v1 first)."""
+    doi = (resolved.get("doi") or "")
+    if not doi.startswith("10.1101/"):
+        return {}
+    for server in ("biorxiv", "medrxiv"):
+        for ver in (1, 2):                             # v1 always exists; try a revision next
+            try:
+                r = requests.get(BIORXIV.format(server=server, doi=doi, ver=ver),
+                                 headers=_headers(), timeout=config.HTTP_TIMEOUT)
+            except Exception:
+                continue
+            if r.status_code != 200 or len(r.text) < 2000:
+                continue
+            secs = _from_html_sections(r.text)
+            if _usable_fulltext(secs):
+                return secs
+    return {}
+
+
+def _arxiv_id(resolved: dict) -> str:
+    """Pull an arXiv id from a DataCite DOI (10.48550/arXiv.*), an arxiv.org
+    URL, or a raw 'arXiv:...' reference."""
+    m = re.search(r"10\.48550/arxiv\.(.+)$", resolved.get("doi") or "", re.I)
+    if m:
+        return m.group(1)
+    ids = resolved.get("ids") or {}
+    blob = " ".join(str(ids.get(k) or "") for k in ("url", "raw"))
+    m = re.search(r"arxiv\.org/(?:abs|pdf|html)/" + _ARXIV_ID_RE, blob, re.I) \
+        or re.search(r"arxiv[:\s]*" + _ARXIV_ID_RE, blob, re.I)
+    return (m.group(1) + (m.group(2) or "")) if m else ""
+
+
+def _arxiv_fulltext(resolved: dict) -> dict:
+    """Full text for an arXiv paper, from arXiv's own HTML (newer papers) or
+    ar5iv (older ones) — both server-rendered LaTeX->HTML with section headings.
+    Covers the physics / CS / math / quant-bio literature off PMC."""
+    aid = _arxiv_id(resolved)
+    if not aid:
+        return {}
+    for url in (ARXIV_HTML.format(aid=aid), AR5IV.format(aid=aid)):
+        try:
+            r = requests.get(url, headers=_headers(),
+                             timeout=config.HTTP_TIMEOUT, allow_redirects=True)
+        except Exception:
+            continue
+        if r.status_code != 200 or len(r.text) < 2000:
+            continue
+        secs = _from_html_sections(r.text)
+        if _usable_fulltext(secs):
+            return secs
+    return {}
+
+
+def _epmc_core(resolved: dict) -> dict:
+    """Europe PMC 'core' record for a DOI/PMID (covers most of PubMed). Carries
+    the abstract, the PMCID (even when NCBI's converter didn't link it), and OA
+    flags — so one lookup serves both PMCID recovery and the abstract fallback."""
     q = None
     if resolved.get("doi"):
         q = f'DOI:"{resolved["doi"]}"'
     elif resolved.get("pmid"):
         q = f'EXT_ID:{resolved["pmid"]} AND SRC:MED'
     if not q:
-        return ""
+        return {}
     try:
         r = _get(EPMC, params={"query": q, "format": "json",
                                "resultType": "core"})
         results = r.json().get("resultList", {}).get("result", [])
-        if results:
-            return _strip(results[0].get("abstractText", ""))
+        return results[0] if results else {}
     except Exception:
-        pass
-    return ""
+        return {}
 
 
 def fetch_text(resolved: dict) -> dict:
@@ -153,6 +257,16 @@ def fetch_text(resolved: dict) -> dict:
            "open_access": False, "source": "none", "full_text": ""}
 
     pmcid = resolved.get("pmcid")
+    # Recover a PMCID when resolve() didn't get one: Europe PMC often knows the
+    # PMC version of an OA paper whose DOI NCBI's converter didn't link. This
+    # one lookup is reused for the abstract fallback below.
+    core = {}
+    if not pmcid:
+        core = _epmc_core(resolved)
+        cand = core.get("pmcid")
+        if cand and (core.get("inEPMC") == "Y" or core.get("isOpenAccess") == "Y"):
+            pmcid = cand
+
     if pmcid:
         # 1) PMC BioC — section-tagged JSON (retried inside _get).
         try:
@@ -173,12 +287,30 @@ def fetch_text(resolved: dict) -> dict:
                     out["source"] = "epmc_fulltext"
             except Exception:
                 pass
+        out["pmcid"] = pmcid
 
-    # 3) Fallback: abstract only.
+    # 2b) Preprint full text — "all text" lives off PMC: bioRxiv/medRxiv HTML,
+    # then arXiv HTML / ar5iv for the physics / CS / math / quant-bio literature.
     if not out["sections"]:
-        abs = _epmc_abstract(resolved)
-        if abs:
-            out["sections"] = {"abstract": abs}
+        for fetcher, label in ((_biorxiv_fulltext, "preprint_html"),
+                               (_arxiv_fulltext, "arxiv_html")):
+            try:
+                secs = fetcher(resolved)
+            except Exception:
+                secs = {}
+            if secs:
+                out["sections"] = secs
+                out["open_access"] = True
+                out["source"] = label
+                break
+
+    # 3) Fallback: abstract only (reuse the core record if we already fetched it).
+    if not out["sections"]:
+        if not core:
+            core = _epmc_core(resolved)
+        abstract = _strip(core.get("abstractText", "")) if core else ""
+        if abstract:
+            out["sections"] = {"abstract": abstract}
             out["source"] = "abstract_only"
 
     out["sections_available"] = [s for s in _PRIORITY
