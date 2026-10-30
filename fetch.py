@@ -19,6 +19,9 @@ BIOC = ("https://www.ncbi.nlm.nih.gov/research/bionlp/RESTful/"
 EPMC = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
 EPMC_FULLTEXT = ("https://www.ebi.ac.uk/europepmc/webservices/rest/"
                  "PMC/{pmcid}/fullTextXML")
+OPENALEX_WORK = "https://api.openalex.org/works/doi:{doi}"
+CROSSREF_WORK = "https://api.crossref.org/works/{doi}"
+UNPAYWALL = "https://api.unpaywall.org/v2/{doi}"
 
 _RETRIES = 3
 
@@ -226,6 +229,75 @@ def _arxiv_fulltext(resolved: dict) -> dict:
     return {}
 
 
+def _oa_html_urls(doi: str) -> list:
+    """Candidate open-access full-text HTML URLs for a DOI, off PMC — from
+    OpenAlex (keyless), Crossref full-text links, and Unpaywall (only when a
+    contact email is configured; never a personal address). PDFs are skipped
+    (no PDF parser)."""
+    urls = []
+    try:
+        j = requests.get(OPENALEX_WORK.format(doi=doi),
+                         params={"select": "open_access,best_oa_location,"
+                                 "primary_location,locations"},
+                         headers=_headers(), timeout=config.HTTP_TIMEOUT).json()
+        locs = [j.get("best_oa_location"), j.get("primary_location")] + \
+            (j.get("locations") or [])
+        for loc in locs:
+            if loc and loc.get("is_oa") and loc.get("landing_page_url"):
+                urls.append(loc["landing_page_url"])
+        if (j.get("open_access") or {}).get("oa_url"):
+            urls.append(j["open_access"]["oa_url"])
+    except Exception:
+        pass
+    try:
+        m = requests.get(CROSSREF_WORK.format(doi=doi), headers=_headers(),
+                         timeout=config.HTTP_TIMEOUT).json().get("message", {})
+        for lk in (m.get("link") or []):
+            if "pdf" not in (lk.get("content-type") or "").lower() and lk.get("URL"):
+                urls.append(lk["URL"])
+    except Exception:
+        pass
+    if config.CONTACT_EMAIL:  # Unpaywall requires an email; opt-in only
+        try:
+            j = requests.get(UNPAYWALL.format(doi=doi),
+                             params={"email": config.CONTACT_EMAIL},
+                             headers=_headers(), timeout=config.HTTP_TIMEOUT).json()
+            loc = j.get("best_oa_location") or {}
+            for k in ("url_for_landing_page", "url"):
+                if loc.get(k):
+                    urls.append(loc[k])
+        except Exception:
+            pass
+    seen = []
+    for u in urls:
+        if u and u not in seen and not u.lower().endswith(".pdf"):
+            seen.append(u)
+    return seen[:5]
+
+
+def _oa_fulltext(resolved: dict) -> dict:
+    """Full text from an open-access publisher/repository HTML page (Copernicus,
+    MDPI, Frontiers, PLOS off-PMC, etc.), section-split by headings. Single-shot
+    best-effort; a paywall/landing stub yields too little and is rejected."""
+    doi = resolved.get("doi")
+    if not doi:
+        return {}
+    for url in _oa_html_urls(doi):
+        try:
+            r = requests.get(url, headers={"User-Agent": config.USER_AGENT,
+                                           "Accept": "text/html"},
+                             timeout=config.HTTP_TIMEOUT, allow_redirects=True)
+        except Exception:
+            continue
+        ct = (r.headers.get("content-type") or "").lower()
+        if r.status_code != 200 or "html" not in ct or len(r.text) < 3000:
+            continue
+        secs = _from_html_sections(r.text)
+        if _usable_fulltext(secs):
+            return secs
+    return {}
+
+
 def _epmc_core(resolved: dict) -> dict:
     """Europe PMC 'core' record for a DOI/PMID (covers most of PubMed). Carries
     the abstract, the PMCID (even when NCBI's converter didn't link it), and OA
@@ -303,6 +375,18 @@ def fetch_text(resolved: dict) -> dict:
                 out["open_access"] = True
                 out["source"] = label
                 break
+
+    # 2c) Open-access full text off PMC: publisher/repository HTML (Copernicus,
+    # MDPI, Frontiers, PLOS off-PMC, ...) via OpenAlex/Crossref/Unpaywall links.
+    if not out["sections"]:
+        try:
+            secs = _oa_fulltext(resolved)
+            if secs:
+                out["sections"] = secs
+                out["open_access"] = True
+                out["source"] = "oa_html"
+        except Exception:
+            pass
 
     # 3) Fallback: abstract only (reuse the core record if we already fetched it).
     if not out["sections"]:
