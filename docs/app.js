@@ -524,26 +524,52 @@ const CLARIFIERS = [
   { id:"breadth", q:"How many candidate sources before filtering?", options:["~8 (fast)","~15 (balanced)","~25 (exhaustive)"] },
 ];
 
-// ---------- multi-provider source discovery ----------
-// Fan out to OpenAlex + Crossref + Europe PMC in parallel — all keyless and
-// CORS-open (Access-Control-Allow-Origin: *), so the browser calls them direct
-// with no key, no proxy, no mailto/tracking. Candidates are deduped by DOI,
-// their metadata merged, and ranked by a pure function of explicit trust
-// signals (provider agreement, query-match rank, citations, recency, OA,
-// evidence tier) — so the same query always yields the same order (auditable).
+// ---------- multi-provider, iterative source discovery ----------
+// Round 1 fans out to OpenAlex + Crossref + Europe PMC in parallel — all keyless
+// and CORS-open (Access-Control-Allow-Origin: *), so the browser calls them
+// direct with no key, no proxy, no mailto/tracking. Round 2 follows the citation
+// trail of the strongest hits (their referenced + related works) and folds in
+// papers co-cited by several seeds, lifting recall the way an agent-style search
+// does. Candidates are deduped by DOI, metadata merged, and ranked by a pure
+// function of explicit trust signals (provider agreement, query-match rank,
+// co-citation, citations, recency, OA, evidence tier) — so the same query always
+// yields the same order (auditable). Retracted papers are dropped by default.
+const OA_SELECT = "id,doi,display_name,title,publication_year,primary_location," +
+  "cited_by_count,type,open_access,is_retracted,ids,referenced_works,related_works";
 function cleanDoi(d) {
   if (!d) return null;
   return d.replace(/^https?:\/\/(dx\.)?doi\.org\//i, "").replace(/[).,;>"']+$/, "").toLowerCase();
 }
-async function openAlexSearch(query, n) {
-  const j = await getJSON(`https://api.openalex.org/works?search=${encodeURIComponent(query)}&per_page=${n}`);
-  return (j.results || []).map((w, i) => ({
+function oaCandidate(w, provider, rank) {
+  return {
     doi: cleanDoi(w.doi), pmcid: null,
     pmid: (w.ids && w.ids.pmid) ? w.ids.pmid.split("/").pop() : null,
     title: w.display_name || w.title || null, year: w.publication_year || null,
     venue: (w.primary_location && w.primary_location.source && w.primary_location.source.display_name) || null,
     citations: w.cited_by_count || 0, type: w.type || "", is_oa: !!(w.open_access && w.open_access.is_oa),
-    provider: "openalex", rank: i }));
+    retracted: !!w.is_retracted, provider, rank, cocite: 0,
+    _oaid: (w.id || "").split("/").pop() || null,
+    _refs: w.referenced_works || [], _related: w.related_works || [] };
+}
+async function openAlexSearch(query, n) {
+  const j = await getJSON(`https://api.openalex.org/works?search=${encodeURIComponent(query)}&per_page=${n}&select=${OA_SELECT}`);
+  return (j.results || []).map((w, i) => oaCandidate(w, "openalex", i));
+}
+// Batch-fetch OpenAlex works by id — the citation-trail candidates.
+async function openAlexFetchIds(shortIds, cocite) {
+  const out = [];
+  for (let i = 0; i < shortIds.length; i += 50) {   // OR filter takes up to 50 ids
+    const chunk = shortIds.slice(i, i + 50);
+    let j;
+    try { j = await getJSON(`https://api.openalex.org/works?filter=openalex_id:${encodeURIComponent(chunk.join("|"))}&per_page=50&select=${OA_SELECT}`); }
+    catch (e) { continue; }
+    for (const w of (j.results || [])) {
+      const c = oaCandidate(w, "openalex-cite", 99);
+      c.cocite = cocite.get((w.id || "").split("/").pop()) || 1;
+      out.push(c);
+    }
+  }
+  return out;
 }
 async function crossrefSearch(query, n) {
   const j = await getJSON(`https://api.crossref.org/works?query=${encodeURIComponent(query)}&rows=${n}&select=DOI,title,container-title,issued,is-referenced-by-count,type`);
@@ -553,7 +579,7 @@ async function crossrefSearch(query, n) {
     year: (m.issued && m.issued["date-parts"] && m.issued["date-parts"][0] && m.issued["date-parts"][0][0]) || null,
     venue: (m["container-title"] && m["container-title"][0]) || null,
     citations: m["is-referenced-by-count"] || 0, type: m.type || "", is_oa: false,
-    provider: "crossref", rank: i }));
+    retracted: false, provider: "crossref", rank: i, cocite: 0 }));
 }
 async function epmcProviderSearch(query, n) {
   const j = await getJSON(`https://www.ebi.ac.uk/europepmc/webservices/rest/search?query=${encodeURIComponent(query)}&format=json&resultType=lite&pageSize=${n}`);
@@ -561,7 +587,7 @@ async function epmcProviderSearch(query, n) {
     doi: cleanDoi(r.doi), pmcid: r.pmcid || null, pmid: r.pmid || null,
     title: r.title || null, year: r.pubYear ? Number(r.pubYear) : null, venue: r.journalTitle || null,
     citations: r.citedByCount || 0, type: r.pubType || "", is_oa: r.isOpenAccess === "Y",
-    provider: "epmc", rank: i }));
+    retracted: false, provider: "epmc", rank: i, cocite: 0 }));
 }
 const PROVIDERS = { openalex: openAlexSearch, crossref: crossrefSearch, epmc: epmcProviderSearch };
 // DuckDuckGo-style !bang: scope a query to one provider.
@@ -582,13 +608,18 @@ function mergeCandidates(lists) {
     m.pmcid = m.pmcid || c.pmcid; m.pmid = m.pmid || c.pmid;
     m.citations = Math.max(m.citations || 0, c.citations || 0);
     m.type = m.type || c.type; m.is_oa = m.is_oa || c.is_oa;
+    m.retracted = m.retracted || c.retracted;
+    m.cocite = Math.max(m.cocite || 0, c.cocite || 0);
+    for (const k of ["_oaid", "_refs", "_related"]) if (c[k] && !m[k]) m[k] = c[k];
   }
   return [...byKey.values()];
 }
 function trustScore(c) {
   let s = 0;
-  s += (c.providers ? c.providers.length : 1) * 3;        // agreement across providers
+  const kw = (c.providers || []).filter(p => p !== "openalex-cite").length; // keyword agreement
+  s += kw * 3;
   s += Math.max(0, 6 - (c.bestRank == null ? 9 : c.bestRank)); // query-match (top of a list)
+  s += Math.min(c.cocite || 0, 4) * 2.5;                  // co-cited by strong seeds
   s += Math.log10((c.citations || 0) + 1) * 2;            // impact
   if (c.year) s += Math.max(0, c.year - 2000) * 0.05;     // mild recency tilt
   if (c.is_oa) s += 2;                                    // full text is verifiable
@@ -596,19 +627,56 @@ function trustScore(c) {
   if (PREPRINT_RE.test(c.type || "")) s -= 2;             // not yet peer-reviewed
   return s;
 }
+// Retracted papers always sort last (even when a caller includes them), then by
+// score, then a stable id tiebreak.
+function sortCands(a, b) {
+  return (a.retracted ? 1 : 0) - (b.retracted ? 1 : 0) ||
+    b._score - a._score ||
+    String(a.doi || a.pmcid).localeCompare(String(b.doi || b.pmcid));
+}
+// Collect citation-trail ids from the top seeds, counting how many point at each.
+function citationTrail(ranked, seedK) {
+  const cocite = new Map();
+  for (const c of ranked.slice(0, seedK)) {
+    if (!c._oaid) continue;
+    const seen = new Set();
+    for (const oid of [...(c._refs || []), ...(c._related || [])]) {
+      const sid = (oid || "").split("/").pop();
+      if (sid && !seen.has(sid)) { seen.add(sid); cocite.set(sid, (cocite.get(sid) || 0) + 1); }
+    }
+  }
+  return cocite;
+}
 async function discoverSources(rawQuery, n = 3, opts = {}) {
   let query = (rawQuery || "").trim();
   let scope = opts.scope || null;
   const m = query.match(/(?:^|\s)(![a-z]+)\b/i);          // !bang provider scoping
   if (m && BANGS[m[1].toLowerCase()]) { scope = BANGS[m[1].toLowerCase()]; query = query.replace(m[1], "").replace(/\s+/g, " ").trim(); }
+  if (!query) return [];
+  const rounds = opts.rounds == null ? 2 : opts.rounds;
   const names = scope ? [scope] : ["openalex", "crossref", "epmc"];
   const per = Math.max(n + 3, 8);
   const lists = await Promise.all(names.map(name => PROVIDERS[name](query, per).catch(() => [])));
-  let cands = mergeCandidates(lists).filter(c => c.doi || c.pmcid);
-  if (opts.peerReviewedOnly) cands = cands.filter(c => !PREPRINT_RE.test(c.type || ""));
+  let cands = mergeCandidates(lists);
   cands.forEach(c => c._score = trustScore(c));
-  cands.sort((a, b) => b._score - a._score ||
-    String(a.doi || a.pmcid).localeCompare(String(b.doi || b.pmcid))); // deterministic tiebreak
+  cands.sort(sortCands);
+  // Round 2: follow the citation trail of the strongest OpenAlex hits.
+  if (rounds >= 2 && !scope && names.includes("openalex")) {
+    const cocite = citationTrail(cands, Math.min(4, cands.length));
+    // Require co-citation by >=2 seeds (the citation analog of provider
+    // agreement) — single-seed trail hits are the main source of topic drift.
+    const ids = [...cocite.entries()].filter(([, v]) => v >= 2)
+      .sort((a, b) => b[1] - a[1]).map(([k]) => k).slice(0, 50);
+    if (ids.length) {
+      const trail = await openAlexFetchIds(ids, cocite).catch(() => []);
+      cands = mergeCandidates([...lists, trail]);
+      cands.forEach(c => c._score = trustScore(c));
+      cands.sort(sortCands);
+    }
+  }
+  cands = cands.filter(c => c.doi || c.pmcid);
+  if (!opts.includeRetracted) cands = cands.filter(c => !c.retracted);
+  if (opts.peerReviewedOnly) cands = cands.filter(c => !PREPRINT_RE.test(c.type || ""));
   return cands.slice(0, n);
 }
 
