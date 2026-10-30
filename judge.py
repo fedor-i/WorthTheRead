@@ -260,6 +260,8 @@ _VERDICT_CEIL = {"SUPPORTED": 1.0, "OVERSTATED": 0.6,
 def _check_aspects(aspects: list, haystack_norm: str) -> list:
     checked = []
     for a in aspects or []:
+        if not isinstance(a, dict):
+            continue  # the model occasionally emits a bare string in the list
         st = (a.get("status") or "").upper()
         quote = a.get("quote") or ""
         verified = _quote_verified(quote, haystack_norm) if quote else False
