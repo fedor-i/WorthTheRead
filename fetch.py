@@ -13,6 +13,7 @@ from html import unescape as _unescape
 import requests
 
 from . import config
+from . import store as _store
 
 BIOC = ("https://www.ncbi.nlm.nih.gov/research/bionlp/RESTful/"
         "pmcoa.cgi/BioC_json/{pmcid}/unicode")
@@ -23,8 +24,20 @@ OPENALEX_WORK = "https://api.openalex.org/works/doi:{doi}"
 CROSSREF_WORK = "https://api.crossref.org/works/{doi}"
 UNPAYWALL = "https://api.unpaywall.org/v2/{doi}"
 S2_PAPER = "https://api.semanticscholar.org/graph/v1/paper/{id}"
+FIGSHARE_API = "https://api.figshare.com/v2/articles/{id}"
+ZENODO_API = "https://zenodo.org/api/records/{id}"
+CORE_SEARCH = "https://api.core.ac.uk/v3/search/works"
+SPRINGER_OA = "https://api.springernature.com/openaccess/jats"
+ELSEVIER_ARTICLE = "https://api.elsevier.com/content/article/doi/{doi}"
+DOAJ_SEARCH = "https://doaj.org/api/search/articles/{query}"
 
 _RETRIES = 3
+
+# OA-location "pdf_url"s sometimes point at a figure or graphical abstract, not
+# the article (e.g. OpenAlex handed us a '...-ga1_lrg.jpg' for an OA paper). Skip
+# anything that is plainly an image/asset so a bad link can't preempt a real PDF.
+_ASSET_URL = re.compile(r"\.(?:jpe?g|png|gif|svg|webp|tiff?|bmp)(?:\?|$)"
+                        r"|/content/image/|[-_]ga\d", re.I)
 
 # BioC section_type -> our normalized bucket.
 _SECTION_MAP = {
@@ -104,13 +117,11 @@ def _from_bioc(pmcid: str) -> dict:
     return {k: "\n".join(v) for k, v in sections.items()}
 
 
-def _from_epmc_fulltext(pmcid: str) -> dict:
-    """Alternate full-text source: Europe PMC JATS XML. Parsed into the same
-    section buckets. Returns {} if unavailable or unparseable."""
-    pmcid = pmcid if pmcid.upper().startswith("PMC") else "PMC" + pmcid
-    r = _get(EPMC_FULLTEXT.format(pmcid=pmcid))
+def _jats_sections(content: bytes) -> dict:
+    """Parse JATS XML (Europe PMC full-text, Springer OA) into section buckets.
+    "{*}" matches tags in any namespace. Returns {} if unparseable."""
     try:
-        root = ET.fromstring(r.content)  # "{*}" matches tags in any namespace
+        root = ET.fromstring(content)
     except ET.ParseError:
         return {}
     sections = {}
@@ -119,8 +130,9 @@ def _from_epmc_fulltext(pmcid: str) -> dict:
         if txt:
             sections.setdefault("abstract", []).append(txt)
         break
-    body = root.find(".//{*}body")
-    if body is not None:
+    # findall (not find) so a multi-record response — Springer can return
+    # several <article> elements — contributes every body, not just the first.
+    for body in root.findall(".//{*}body"):
         for sec in body.findall(".//{*}sec"):
             title_el = sec.find("{*}title")
             title = (title_el.text if title_el is not None else "") or ""
@@ -132,6 +144,14 @@ def _from_epmc_fulltext(pmcid: str) -> dict:
             if txt:
                 sections.setdefault(bucket, []).append(txt)
     return {k: "\n".join(v) for k, v in sections.items()}
+
+
+def _from_epmc_fulltext(pmcid: str) -> dict:
+    """Alternate full-text source: Europe PMC JATS XML. Parsed into the same
+    section buckets. Returns {} if unavailable or unparseable."""
+    pmcid = pmcid if pmcid.upper().startswith("PMC") else "PMC" + pmcid
+    r = _get(EPMC_FULLTEXT.format(pmcid=pmcid))
+    return _jats_sections(r.content)
 
 
 BIORXIV = "https://www.{server}.org/content/{doi}v{ver}.full"
@@ -173,12 +193,19 @@ def _from_html_sections(html: str) -> dict:
 def _usable_fulltext(secs: dict) -> bool:
     """Accept parsed HTML as real full text: an evidence-bearing section, or
     enough body prose (arXiv CS/physics papers often label it Evaluation /
-    Experiments rather than Results)."""
+    Experiments rather than Results).
+
+    When NOTHING sectioned into an evidence-bearing bucket, the content is one
+    undifferentiated 'other' blob — real only if it is substantial. A landing /
+    abstract page is a few thousand characters and must NOT qualify, or it
+    short-circuits the PDF tier that holds the actual article (NEJM/Lancet off
+    PMC): require a real body's worth of prose before trusting an unsectioned
+    blob."""
     if not secs:
         return False
     if any(secs.get(b) for b in ("results", "discussion", "conclusion", "methods")):
         return True
-    return sum(len(v) for k, v in secs.items() if k != "title") >= 3000
+    return sum(len(v) for k, v in secs.items() if k != "title") >= 8000
 
 
 def _biorxiv_fulltext(resolved: dict) -> dict:
@@ -306,6 +333,66 @@ def _oa_fulltext(resolved: dict) -> dict:
     return {}
 
 
+# Standalone section headings as they survive PDF text extraction — a short
+# line that is exactly a canonical section name (structured-abstract headings
+# like "RESULTS" and body headings like "Results" both match).
+_TEXT_HEAD = re.compile(
+    r"^\s*(?:\d+\.?\s*)?(abstract|introduction|background|"
+    r"materials?\s+and\s+methods|methods?|results?(?:\s+and\s+discussion)?|"
+    r"discussion|conclusions?|references|acknowledg(?:e)?ments?|"
+    r"supplementary(?:\s+\w+)*)\s*:?\s*$", re.I)
+
+
+def _bucket_from_heading(h: str):
+    """Map a matched heading to a section bucket, or None if unrecognized."""
+    h = h.lower()
+    if "abstract" in h:
+        return "abstract"
+    if "result" in h:
+        return "results"
+    if "method" in h or "material" in h:
+        return "methods"
+    if "discuss" in h:
+        return "discussion"
+    if "conclu" in h:
+        return "conclusion"
+    if "introduc" in h or "background" in h:
+        return "introduction"
+    if "reference" in h or "acknowledg" in h or "supplement" in h:
+        return "supplement"  # captured but deprioritized (not evidence-bearing)
+    return None
+
+
+def _text_sections(text: str) -> dict:
+    """Split plain extracted text (e.g. from a PDF) into section buckets by its
+    standalone heading lines, so a PDF-sourced paper gets a real RESULTS bucket
+    (and thus has_results) instead of one undifferentiated blob. Returns {} when
+    no canonical heading is found, so the caller can fall back to one 'other'
+    blob — no regression for headingless extractions."""
+    sections, current, buf = {}, "other", []
+
+    def flush():
+        if buf:
+            t = _strip(" ".join(buf))
+            if t:
+                sections.setdefault(current, []).append(t)
+
+    for line in text.splitlines():
+        s = line.strip()
+        m = _TEXT_HEAD.match(s) if s and len(s) <= 40 else None
+        bucket = _bucket_from_heading(m.group(1)) if m else None
+        if bucket:
+            flush()
+            buf, current = [], bucket
+            continue
+        buf.append(line)
+    flush()
+    merged = {k: "\n".join(v) for k, v in sections.items()}
+    # Only claim success if we actually carved out named sections (more than the
+    # leading 'other' preamble); otherwise let the caller keep the raw blob.
+    return merged if any(k != "other" for k in merged) else {}
+
+
 def _pdf_to_text(content: bytes) -> str:
     """Extract text from a PDF (pypdf). Returns '' if unavailable/unparseable."""
     try:
@@ -313,7 +400,7 @@ def _pdf_to_text(content: bytes) -> str:
         import pypdf
         reader = pypdf.PdfReader(io.BytesIO(content))
         parts = [(pg.extract_text() or "") for pg in reader.pages[:40]]
-        return _strip("\n".join(p for p in parts if p))
+        return "\n".join(p for p in parts if p)
     except Exception:
         return ""
 
@@ -359,28 +446,237 @@ def _oa_pdf_urls(doi: str) -> list:
             pass
     seen = []
     for u in urls:
-        if u and u not in seen:
+        if u and u not in seen and not _ASSET_URL.search(u):
             seen.append(u)
     return seen[:5]
 
 
 def _pdf_fulltext(resolved: dict) -> dict:
-    """Full text from an open-access PDF (unsectioned -> 'other' bucket)."""
+    """Full text from an open-access PDF — section-split by heading lines when
+    possible (so RESULTS is recognized), else one 'other' blob."""
     doi = resolved.get("doi")
     if not doi:
         return {}
     for url in _oa_pdf_urls(doi):
-        try:
-            r = requests.get(url, headers={"User-Agent": config.USER_AGENT},
-                             timeout=config.HTTP_TIMEOUT, allow_redirects=True)
-        except Exception:
+        r = None
+        for attempt in range(_RETRIES):  # OA mirrors are flaky; the PDF tier is
+            try:                         # the valuable fallback, so retry it.
+                r = requests.get(url, headers={"User-Agent": config.USER_AGENT},
+                                 timeout=config.HTTP_TIMEOUT, allow_redirects=True)
+                if r.status_code == 200:
+                    break
+            except Exception:
+                r = None
+            time.sleep(0.6 * (attempt + 1))
+        if r is None or r.status_code != 200:
             continue
         ct = (r.headers.get("content-type") or "").lower()
-        if r.status_code != 200 or ("pdf" not in ct and not r.content[:5] == b"%PDF-"):
+        if "pdf" not in ct and not r.content[:5] == b"%PDF-":
             continue
         text = _pdf_to_text(r.content)
         if len(text) >= 1500:
-            return {"other": text}
+            return _text_sections(text) or {"other": _strip(text)}
+    return {}
+
+
+def _deposit_pdf_urls(doi: str) -> list:
+    """Direct PDF download URLs from open deposit repositories (figshare, Zenodo)
+    that OpenAlex lists as OA locations. These host the author's copy of the
+    article and expose the actual PDF through a documented keyless JSON API, so
+    they rescue papers whose publisher PDF is bot-blocked but whose deposit is
+    openly downloadable (e.g. an Elsevier gold-OA paper mirrored on figshare)."""
+    landings = []
+    try:
+        j = requests.get(OPENALEX_WORK.format(doi=doi),
+                         params={"select": "best_oa_location,primary_location,locations"},
+                         headers=_headers(), timeout=config.HTTP_TIMEOUT).json()
+        for loc in [j.get("best_oa_location"), j.get("primary_location")] + \
+                (j.get("locations") or []):
+            if loc and loc.get("landing_page_url"):
+                landings.append(loc["landing_page_url"])
+    except Exception:
+        pass
+    urls = []
+    for u in landings:
+        m = re.search(r"figshare\.com/.*?/(\d{6,})(?:/\d+)?/?(?:\?|$)", u, re.I)
+        if m:
+            try:
+                d = requests.get(FIGSHARE_API.format(id=m.group(1)),
+                                 headers=_headers(), timeout=config.HTTP_TIMEOUT).json()
+                for f in (d.get("files") or []):
+                    if (f.get("name") or "").lower().endswith(".pdf") and f.get("download_url"):
+                        urls.append(f["download_url"])
+            except Exception:
+                pass
+            continue
+        m = re.search(r"zenodo\.org/record[s]?/(\d+)", u, re.I)
+        if m:
+            try:
+                d = requests.get(ZENODO_API.format(id=m.group(1)),
+                                 headers=_headers(), timeout=config.HTTP_TIMEOUT).json()
+                for f in (d.get("files") or []):
+                    link = (f.get("links") or {}).get("self")
+                    if (f.get("key") or "").lower().endswith(".pdf") and link:
+                        urls.append(link)
+            except Exception:
+                pass
+    seen = []
+    for u in urls:
+        if u and u not in seen:
+            seen.append(u)
+    return seen[:5]
+
+
+def _deposit_fulltext(resolved: dict) -> dict:
+    """Full text from an open deposit-repository PDF (figshare/Zenodo), parsed and
+    section-split like any other PDF."""
+    doi = resolved.get("doi")
+    if not doi:
+        return {}
+    for url in _deposit_pdf_urls(doi):
+        try:
+            r = requests.get(url, headers=_headers(),
+                             timeout=config.HTTP_TIMEOUT, allow_redirects=True)
+        except Exception:
+            continue
+        if r.status_code != 200:
+            continue
+        if not (r.content[:5] == b"%PDF-"
+                or "pdf" in (r.headers.get("content-type") or "").lower()):
+            continue
+        text = _pdf_to_text(r.content)
+        if len(text) >= 1500:
+            return _text_sections(text) or {"other": _strip(text)}
+    return {}
+
+
+def _core_fulltext(resolved: dict) -> dict:
+    """Green-OA full text from CORE (core.ac.uk), the large aggregator of
+    institutional-repository copies. Requires a free API key (config.CORE_API_KEY);
+    CORE's anonymous endpoints are bot-blocked, so this tier is inactive without
+    one. Returns CORE's own extracted fullText, else a parsed download, else {}."""
+    doi = resolved.get("doi")
+    if not doi or not config.CORE_API_KEY:
+        return {}
+    hdr = {"User-Agent": config.USER_AGENT,
+           "Authorization": f"Bearer {config.CORE_API_KEY}"}
+    try:
+        r = requests.get(CORE_SEARCH, params={"q": f'doi:"{doi}"', "limit": 3},
+                         headers=hdr, timeout=config.HTTP_TIMEOUT)
+        if r.status_code != 200:
+            return {}
+        results = r.json().get("results") or []
+    except Exception:
+        return {}
+    for work in results:
+        # a) CORE's own extracted full text — already plain text, best case.
+        ft = _strip(work.get("fullText") or "")
+        if len(ft) >= 1500:
+            return _text_sections(ft) or {"other": ft}
+        # b) the ORIGINAL repository PDFs CORE indexed (sourceFulltextUrls). We
+        #    skip CORE's own core.ac.uk download/image endpoints (bot-blocked)
+        #    and plain assets, and fetch the repository copy directly.
+        for u in (work.get("sourceFulltextUrls") or []):
+            if not u or "core.ac.uk" in u or _ASSET_URL.search(u):
+                continue
+            try:
+                d = requests.get(u, headers=_headers(), timeout=config.HTTP_TIMEOUT,
+                                 allow_redirects=True)
+            except Exception:
+                continue
+            if d.status_code == 200 and d.content[:5] == b"%PDF-":
+                text = _pdf_to_text(d.content)
+                if len(text) >= 1500:
+                    return _text_sections(text) or {"other": _strip(text)}
+    return {}
+
+
+def _springer_fulltext(resolved: dict) -> dict:
+    """Full text from the Springer Nature Open Access API (JATS) — the sanctioned
+    machine path to Springer/Nature/BMC open-access articles, not bot-blocked
+    like the public pages. Requires a free key (config.SPRINGER_API_KEY)."""
+    doi = resolved.get("doi")
+    if not doi or not config.SPRINGER_API_KEY:
+        return {}
+    try:
+        r = requests.get(SPRINGER_OA,
+                         params={"q": f"doi:{doi}", "api_key": config.SPRINGER_API_KEY},
+                         headers=_headers(), timeout=config.HTTP_TIMEOUT)
+        if r.status_code != 200:
+            return {}
+        return _jats_sections(r.content)
+    except Exception:
+        return {}
+
+
+def _elsevier_fulltext(resolved: dict) -> dict:
+    """Full text from the Elsevier Article Retrieval API. A free key
+    (config.ELSEVIER_API_KEY) returns full text for Elsevier OA articles; an
+    optional institutional token (config.ELSEVIER_INSTTOKEN) also unlocks
+    subscription content the institution is entitled to. Inactive without a key
+    (the keyless response carries only metadata, no originalText)."""
+    doi = resolved.get("doi")
+    if not doi or not config.ELSEVIER_API_KEY:
+        return {}
+    hdr = {"User-Agent": config.USER_AGENT, "Accept": "application/json",
+           "X-ELS-APIKey": config.ELSEVIER_API_KEY}
+    if config.ELSEVIER_INSTTOKEN:
+        hdr["X-ELS-Insttoken"] = config.ELSEVIER_INSTTOKEN
+    try:
+        r = requests.get(ELSEVIER_ARTICLE.format(doi=doi), headers=hdr,
+                         timeout=config.HTTP_TIMEOUT)
+        if r.status_code != 200:
+            return {}
+        body = (r.json().get("full-text-retrieval-response") or {})
+        text = _strip(body.get("originalText") or "")
+        if len(text) >= 1500:
+            return _text_sections(text) or {"other": text}
+    except Exception:
+        return {}
+    return {}
+
+
+def _doaj_fulltext(resolved: dict) -> dict:
+    """Full text via DOAJ (keyless): DOAJ indexes gold-OA journal articles and
+    lists each one's 'fulltext' link (publisher HTML or a repository PDF). We
+    fetch that link and parse it — catches gold OA that OpenAlex/Crossref miss."""
+    doi = resolved.get("doi")
+    if not doi:
+        return {}
+    from urllib.parse import quote
+    try:
+        r = requests.get(DOAJ_SEARCH.format(query=quote(f'doi:"{doi}"', safe="")),
+                         headers=_headers(), timeout=config.HTTP_TIMEOUT)
+        if r.status_code != 200:
+            return {}
+        results = r.json().get("results") or []
+    except Exception:
+        return {}
+    urls = []
+    for art in results:
+        for lk in ((art.get("bibjson") or {}).get("link") or []):
+            if lk.get("type") == "fulltext" and lk.get("url"):
+                urls.append(lk["url"])
+    for u in urls[:4]:
+        if _ASSET_URL.search(u):
+            continue
+        try:
+            r = requests.get(u, headers={"User-Agent": config.USER_AGENT,
+                             "Accept": "text/html,application/pdf,*/*"},
+                             timeout=config.HTTP_TIMEOUT, allow_redirects=True)
+        except Exception:
+            continue
+        if r.status_code != 200:
+            continue
+        ct = (r.headers.get("content-type") or "").lower()
+        if r.content[:5] == b"%PDF-" or "pdf" in ct:
+            text = _pdf_to_text(r.content)
+            if len(text) >= 1500:
+                return _text_sections(text) or {"other": _strip(text)}
+        elif "html" in ct:
+            secs = _from_html_sections(r.text)
+            if _usable_fulltext(secs):
+                return secs
     return {}
 
 
@@ -414,6 +710,45 @@ def _epmc_core(resolved: dict) -> dict:
         return {}
 
 
+def assemble(out: dict) -> dict:
+    """Fill the derived fields of a fetched dict from its `sections` and
+    `source`: sections_available, has_results, has_fulltext, and the capped
+    `full_text` the judge reads (priority order, `## BUCKET` headers). Shared by
+    fetch_text and the local-library ingest so both look identical downstream."""
+    out["sections_available"] = [s for s in _PRIORITY
+                                 if s in out["sections"] and out["sections"][s]]
+    out["has_results"] = "results" in out["sections_available"]
+
+    # "Full text (not just an abstract) obtained" — this, not has_results, is
+    # what the judge's 0.5 confidence cap should key off. has_results is too
+    # literal: physics papers, parsed PDFs, and some journals carry their
+    # findings under non-"Results" headings or one unsectioned body, so keying
+    # the cap off a literal RESULTS bucket wrongly pins real full-text reads at
+    # 0.5. Accept an evidence-bearing section OR a substantial body of prose.
+    _body = sum(len(out["sections"].get(b, ""))
+                for b in ("results", "discussion", "conclusion", "methods", "other"))
+    out["has_fulltext"] = (
+        out["source"] not in ("none", "abstract_only", "supplied_text")
+        and (any(out["sections"].get(b)
+                 for b in ("results", "discussion", "conclusion", "methods"))
+             or _body >= 5000))
+
+    # Assemble capped full text in priority order with headers.
+    parts, budget = [], config.MAX_TEXT_CHARS
+    for bucket in _PRIORITY:
+        txt = out["sections"].get(bucket)
+        if not txt:
+            continue
+        header = f"\n## {bucket.upper()}\n"
+        chunk = (header + txt)[:budget]
+        parts.append(chunk)
+        budget -= len(chunk)
+        if budget <= 0:
+            break
+    out["full_text"] = "".join(parts).strip()
+    return out
+
+
 _FETCH_CACHE = {}
 
 
@@ -436,6 +771,10 @@ def fetch_text(resolved: dict) -> dict:
     key = (resolved.get("doi") or resolved.get("pmcid") or "").lower()
     if key and key in _FETCH_CACHE:
         return _FETCH_CACHE[key]
+    cached = _store.get(key)          # on-disk cache (sidecar only)
+    if cached:
+        _FETCH_CACHE[key] = cached
+        return cached
     out = {"sections": {}, "sections_available": [], "has_results": False,
            "open_access": False, "source": "none", "full_text": ""}
 
@@ -487,6 +826,22 @@ def fetch_text(resolved: dict) -> dict:
                 out["source"] = label
                 break
 
+    # 2b2) Publisher open-access APIs (key-gated) — the sanctioned machine path
+    # to Springer/Nature/BMC and Elsevier OA full text, cleaner than scraping and
+    # not bot-blocked. No-ops without their keys, so keyless behavior is unchanged.
+    if not out["sections"]:
+        for fetcher, label in ((_springer_fulltext, "springer_oa"),
+                               (_elsevier_fulltext, "elsevier_oa")):
+            try:
+                secs = fetcher(resolved)
+            except Exception:
+                secs = {}
+            if secs:
+                out["sections"] = secs
+                out["open_access"] = True
+                out["source"] = label
+                break
+
     # 2c) Open-access full text off PMC: publisher/repository HTML (Copernicus,
     # MDPI, Frontiers, PLOS off-PMC, ...) via OpenAlex/Crossref/Unpaywall links.
     if not out["sections"]:
@@ -496,6 +851,17 @@ def fetch_text(resolved: dict) -> dict:
                 out["sections"] = secs
                 out["open_access"] = True
                 out["source"] = "oa_html"
+        except Exception:
+            pass
+
+    # 2c2) DOAJ (keyless) — gold-OA journal full-text links OpenAlex/Crossref miss.
+    if not out["sections"]:
+        try:
+            secs = _doaj_fulltext(resolved)
+            if secs:
+                out["sections"] = secs
+                out["open_access"] = True
+                out["source"] = "doaj"
         except Exception:
             pass
 
@@ -510,6 +876,30 @@ def fetch_text(resolved: dict) -> dict:
         except Exception:
             pass
 
+    # 2e) Open deposit repositories (figshare/Zenodo) — the author's openly
+    # downloadable PDF when the publisher's own copy is bot-blocked. Keyless.
+    if not out["sections"]:
+        try:
+            secs = _deposit_fulltext(resolved)
+            if secs:
+                out["sections"] = secs
+                out["open_access"] = True
+                out["source"] = "deposit_pdf"
+        except Exception:
+            pass
+
+    # 2f) CORE aggregator (green-OA institutional-repository copies). Requires
+    # WYR_CORE_API_KEY; a no-op when unset (CORE blocks anonymous access).
+    if not out["sections"]:
+        try:
+            secs = _core_fulltext(resolved)
+            if secs:
+                out["sections"] = secs
+                out["open_access"] = True
+                out["source"] = "core"
+        except Exception:
+            pass
+
     # 3) Fallback: abstract only (Europe PMC, then Semantic Scholar).
     if not out["sections"]:
         if not core:
@@ -521,23 +911,8 @@ def fetch_text(resolved: dict) -> dict:
             out["sections"] = {"abstract": abstract}
             out["source"] = "abstract_only"
 
-    out["sections_available"] = [s for s in _PRIORITY
-                                 if s in out["sections"] and out["sections"][s]]
-    out["has_results"] = "results" in out["sections_available"]
-
-    # Assemble capped full text in priority order with headers.
-    parts, budget = [], config.MAX_TEXT_CHARS
-    for bucket in _PRIORITY:
-        txt = out["sections"].get(bucket)
-        if not txt:
-            continue
-        header = f"\n## {bucket.upper()}\n"
-        chunk = (header + txt)[:budget]
-        parts.append(chunk)
-        budget -= len(chunk)
-        if budget <= 0:
-            break
-    out["full_text"] = "".join(parts).strip()
+    assemble(out)
     if key:
         _FETCH_CACHE[key] = out
+        _store.put(key, out)
     return out

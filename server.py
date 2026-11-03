@@ -50,9 +50,21 @@ mcp = FastMCP("worth-your-read", instructions=(
 
 
 async def _run_judge(ctx, claim: str, fetched: dict) -> dict:
-    """Prefer host sampling; fall back to api/bedrock; else INSUFFICIENT."""
+    """Local Ollama (opt-in) first; else host sampling; else api/bedrock."""
     if not fetched.get("full_text"):
         return _judge.no_text_result()
+
+    # 0) Local model via Ollama — explicit opt-in (WYR_USE_OLLAMA), so it takes
+    # precedence over host sampling: choosing a local judge is deliberate.
+    if _config.USE_OLLAMA:
+        try:
+            out = _judge.judge_claim_ollama(claim, fetched)
+            out["judge_backend"] = "ollama"
+            return out
+        except Exception as e:
+            r = _judge.no_text_result(f"Local Ollama judge failed: {e}")
+            r["judge_backend"] = "ollama_error"
+            return r
 
     # 1) Through this chat: ask the host's model via MCP sampling.
     if ctx is not None:
@@ -68,7 +80,7 @@ async def _run_judge(ctx, claim: str, fetched: dict) -> dict:
             )
             text = getattr(res.content, "text", "") or ""
             if text.strip():
-                out = _judge.parse_json_verdict(text, fetched)
+                out = _judge.parse_json_verdict(text, fetched, claim)
                 out["judge_backend"] = "client_sampling"
                 return out
         except Exception as e:
@@ -145,7 +157,7 @@ async def _verify(claim: str, reference: str, expected_title: str = "",
             "concern": False, "is_preprint": False, "published_as": None,
             "has_preprint": None, "verified_from_preprint": None,
             "verified_reference": None, "sections_available": ["abstract"],
-            "has_results": False, "open_access": False,
+            "has_results": False, "has_fulltext": False, "open_access": False,
             "fetch_source": "supplied_text", "resolve_error": None,
         })
         result["summary"] = _render.summary(result)
@@ -195,6 +207,7 @@ async def _verify(claim: str, reference: str, expected_title: str = "",
         "verified_reference": resolved.get("doi") or reference,
         "sections_available": fetched.get("sections_available", []),
         "has_results": fetched.get("has_results", False),
+        "has_fulltext": fetched.get("has_fulltext", False),
         "open_access": fetched.get("open_access", False),
         "fetch_source": fetched.get("source"),
         "resolve_error": resolved.get("error"),
@@ -207,7 +220,7 @@ async def _verify(claim: str, reference: str, expected_title: str = "",
 @mcp.tool()
 async def verify_claim(claim: str, reference: str = "", expected_title: str = "",
                        evidence_text: str = "", passes: int = 1,
-                       ctx: Context = None) -> dict:
+                       html: bool = False, ctx: Context = None) -> dict:
     """Verify a scientific CLAIM against the REFERENCE it cites.
 
     Checks that the link resolves to a real, non-retracted paper, fetches the
@@ -227,14 +240,20 @@ async def verify_claim(claim: str, reference: str = "", expected_title: str = ""
         passes: self-consistency — judge this many times (odd, e.g. 3) and take
             the majority verdict, to remove run-to-run ambiguity on borderline
             claims; confidence drops when the passes disagree. Default 1.
+        html: also return an `html` field — a self-contained, styled page of the
+            verdict with verified quotes and links to the full text, to open or
+            share. Off by default so the response stays compact.
     """
-    return await _verify(claim, reference, expected_title, ctx,
-                         evidence_text=evidence_text, passes=passes)
+    result = await _verify(claim, reference, expected_title, ctx,
+                           evidence_text=evidence_text, passes=passes)
+    if html:
+        result["html"] = _render.verdict_html(result)
+    return result
 
 
 @mcp.tool()
 async def score_answer(claims: list, min_confidence: float = 0.0,
-                       ctx: Context = None) -> dict:
+                       html: bool = False, ctx: Context = None) -> dict:
     """Score a whole answer. Each item is {claim, reference} (optionally
     expected_title). Verifies every claim, then returns an overall confidence
     score and a ranked "worth your read" source list.
@@ -242,6 +261,10 @@ async def score_answer(claims: list, min_confidence: float = 0.0,
     min_confidence (0-1): sources whose supporting verdict falls below this are
     screened out of the list entirely, so you can gather many candidate
     references and keep only the ones that clear your bar.
+
+    html: also return an `html` field — a self-contained scorecard page (overall
+    grade, the ranked "worth your read" list with links, and every claim's
+    verdict card). Off by default so the response stays compact.
     """
     results = []
     for c in claims:
@@ -255,11 +278,19 @@ async def score_answer(claims: list, min_confidence: float = 0.0,
         f"{len(summary.get('worth_your_read', []))} source(s) worth reading.")
     summary["card"] = _render.render_scorecard(summary)
     summary["claims"] = results
+    if html:
+        summary["html"] = _render.scorecard_html(summary, results)
     return summary
 
 
 async def _run_revise(ctx, claim: str, result: dict):
-    """Propose a tightened claim: host sampling first, then api/bedrock."""
+    """Propose a tightened claim: local Ollama (opt-in) first, then host
+    sampling, then api/bedrock — the same order as the judge."""
+    if _config.USE_OLLAMA:
+        try:
+            return _judge.revise_claim_ollama(claim, result) or None
+        except Exception:
+            return None
     if ctx is not None:
         try:
             from mcp.types import SamplingMessage, TextContent
@@ -329,6 +360,7 @@ async def _strengthen(claim: str, existing: list, want: int, ctx) -> list:
     candidate pool is exhausted). Mirrors the site's strengthenClaim."""
     have = _cited_keys(existing)
     cands = _discover.discover_sources(claim, n=want + len(have) + 6)
+    cands = _discover.triage(claim, cands, keep=want + len(have) + 3)
     out, supported = [], 0
     for c in cands:
         ref = c.get("doi") or c.get("pmcid")
@@ -526,16 +558,21 @@ def _keywords(text: str, k: int = 6) -> str:
 async def _suggest_sources(claim: str, n: int, exclude: str, breadth: int,
                            ctx) -> dict:
     skip = (exclude or "").lower().strip().replace("doi:", "")
-    cands = _discover.discover_sources(claim, n=breadth)
+    pool = max(12, breadth * 3)   # discovery is cheap; cast wide, verify few
+    cands = _discover.discover_sources(claim, n=pool)
     seen = {(c.get("doi") or c.get("pmcid") or "").lower() for c in cands}
     kw = _keywords(claim)
     if kw and kw.lower() != claim.lower():
-        for c in _discover.discover_sources(kw, n=breadth):
+        for c in _discover.discover_sources(kw, n=pool):
             key = (c.get("doi") or c.get("pmcid") or "").lower()
             if key and key not in seen:
                 seen.add(key)
                 cands.append(c)
-    cands.sort(key=lambda c: -(c.get("_score") or 0))
+    # Triage on title + abstract first: full verification is the expensive
+    # step, so spend it on the few candidates most likely to support the claim.
+    cands = [c for c in cands
+             if (c.get("doi") or c.get("pmcid") or "").lower() != skip]
+    cands = _discover.triage(claim, cands, keep=breadth)
     found, checked = [], 0
     for c in cands:
         ref = c.get("doi") or c.get("pmcid")
@@ -568,7 +605,7 @@ async def _suggest_sources(claim: str, n: int, exclude: str, breadth: int,
 
 @mcp.tool()
 async def suggest_sources(claim: str, n: int = 3, exclude: str = "",
-                          breadth: int = 14, ctx: Context = None) -> dict:
+                          breadth: int = 5, ctx: Context = None) -> dict:
     """Find real papers that actually SUPPORT a claim — to add a citation, or
     replace one that doesn't hold up.
 
@@ -583,8 +620,9 @@ async def suggest_sources(claim: str, n: int = 3, exclude: str = "",
         claim: the claim to find support for.
         n: how many supporting sources to return.
         exclude: a DOI to skip (e.g. the citation that already failed).
-        breadth: how many candidate papers to search/verify (wider = more
-            thorough, more model calls).
+        breadth: how many candidate papers to fully verify after the cheap
+            title + abstract triage (wider = more thorough, more model calls;
+            each costs about a minute on a local model).
     """
     return await _suggest_sources(claim, n, exclude, breadth, ctx)
 
@@ -619,7 +657,7 @@ async def audit_paper(reference: str, max_claims: int = 8,
         for c in out.get("claims", []):
             if c.get("verdict") in ("OVERSTATED", "UNSUPPORTED", "INSUFFICIENT"):
                 cited = (c.get("verified_against") or {}).get("doi", "")
-                sug = await _suggest_sources(c["claim"], 1, cited, 6, ctx)
+                sug = await _suggest_sources(c["claim"], 1, cited, 3, ctx)
                 top = next((s for s in sug["suggested"]
                             if s["verdict"] == "SUPPORTED"), None)
                 if top:  # only offer a genuinely supporting replacement

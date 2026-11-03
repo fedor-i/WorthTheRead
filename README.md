@@ -108,6 +108,12 @@ The judge reaches Claude one of two ways:
    To force the API-key path even under Claude Code, set `WYR_USE_BEDROCK=0`.
    The Bedrock IAM principal needs `bedrock:InvokeModel`, and calls bill your
    AWS account.
+3. **Local Ollama** — set `WYR_USE_OLLAMA=1` and `WYR_OLLAMA_MODEL`
+   (e.g. `gemma4:26b`). Nothing leaves the machine except the paper lookups
+   themselves. The local judge reads the abstract plus the claim's best-matching
+   passages (`WYR_OLLAMA_FOCUS_CHARS`, default 12000; `0` reads everything);
+   quotes are still verified against the full text. Rewriting claims
+   (`revise_claim`) also runs locally.
 
 ## Live website (GitHub Pages)
 
@@ -136,6 +142,50 @@ instead of in the browser:
 pip install "worth-your-read[web] @ git+https://github.com/fedor-i/WorthTheRead.git"
 export ANTHROPIC_API_KEY=sk-ant-...   WYR_USE_BEDROCK=0
 uvicorn worth_your_read.web.app:app --reload   # http://127.0.0.1:8000
+```
+
+## Local sidecar (for the Zotero plugin)
+
+A small HTTP API on `127.0.0.1:23120` (`WYR_SIDECAR_PORT`) with the same
+engine, plus papers already on disk (a Zotero attachment's text cache or any
+PDF, readable offline), grounded "ask this paper" answers and summaries, and an
+on-disk cache in `WYR_DATA_DIR` (default `~/Library/Application Support/WorthYourRead`).
+
+```bash
+pip install "worth-your-read[sidecar] @ git+https://github.com/fedor-i/WorthTheRead.git"
+WYR_USE_OLLAMA=1 WYR_OLLAMA_MODEL=gemma4:26b wyr-sidecar
+```
+
+The Zotero plugin starts `wyr-sidecar` itself when it first needs it (with
+Ollama and `gemma4:26b`) and stops it when Zotero quits, so running it by hand
+is only needed for other clients or custom environment variables.
+
+Every call needs the header `X-WYR-Token` (the token is created on first run in
+`$WYR_DATA_DIR/sidecar.token`, readable only by you). Model work runs as jobs,
+one at a time: `POST /jobs {"kind": ..., "args": ...}` returns a `job_id`; poll
+`GET /jobs/{job_id}`. Kinds: `verify`, `ask`, `summarize`, `revise`, `suggest`,
+`find`, `plan`, `locate` (on-page rectangles of quotes, for highlights),
+`research` (snowball the citation graph from a question until it runs dry; reports `progress`).
+Research uses OpenAlex heavily; without a key OpenAlex allows a small daily
+request budget, so set `WYR_OPENALEX_API_KEY` (and `WYR_CONTACT_EMAIL`) for regular use.
+OpenAlex responses are cached on disk, so repeat searches cost nothing; a
+fresh search typically needs ~50–110 requests (citing papers are looked up 25
+at a time). To stay on topic, the local model scores each candidate 0–3 against
+the question's *outcome*, and a weaker match (2) is only followed one citation
+hop from a direct hit; further out it must be cited by two accepted papers. The
+summary says when either limit shaped the result. Optional: `WYR_SEMANTIC_STAGE1=1`
+(with the `semantic` extra, scikit-learn) pre-ranks candidates by TF-IDF + LSA
+closeness to the question and the papers that answer it directly, instead of
+word overlap — on the metformin benchmark it found more direct hits (40 vs 29)
+at the same recall and model cost, so it's off by default. Duplicate records of one
+paper and correction notices are collapsed. A paper is `{"attachment_key": "ABCD1234"}`, `{"pdf_path": ...}`
+or `{"reference": "<DOI>"}`; verified quotes carry the `page` they're on.
+
+## Tests
+
+```bash
+# from the project root (one level up); offline, no model needed
+./worth_your_read/.venv/bin/python -m pytest worth_your_read/tests
 ```
 
 ## Smoke test

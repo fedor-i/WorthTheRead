@@ -17,6 +17,7 @@ import os
 import re
 
 from . import config
+from . import focus as _focus
 
 VERDICTS = ("SUPPORTED", "OVERSTATED", "UNSUPPORTED", "INSUFFICIENT")
 DISTORTIONS = ("none", "correlation_causation", "animal_to_human",
@@ -47,9 +48,20 @@ Use these types where they apply:
 - "outcome": what was measured or affected.
 - "direction": the sign of the effect (increase / decrease / no effect).
 - "magnitude": how large the effect is — ONLY include this if the claim \
-actually asserts a size.
+actually asserts a size. A strength word the claim puts on an outcome \
+("substantial", "major", "dramatic", "leading cause", "strongly", "profound") \
+IS an asserted size: give it its OWN magnitude aspect, separate from the \
+outcome's existence. The outcome aspect is ENTAILED when the text shows the \
+outcome occurs; the magnitude aspect is ENTAILED ONLY when the text establishes \
+that asserted strength — text that merely MENTIONS the outcome or says it "can \
+occur" / "may lead to" does NOT entail an asserted "substantial"/"major" size, \
+so that magnitude is ABSENT.
 Only create an aspect for something the CLAIM actually asserts. A claim is only \
 as strong as its weakest asserted aspect.
+When the claim is a CONJUNCTION or LIST (several outcomes, populations, or \
+effects joined by "and"/commas), decompose EACH conjunct into its own \
+aspect(s). A claim that asserts three outcomes is SUPPORTED only if the text \
+establishes all three.
 
 Rule on EACH aspect separately, IN THE CLAIM'S OWN POLARITY, using ONLY the \
 provided text:
@@ -265,7 +277,17 @@ def build_revise_user(claim: str, result: dict) -> str:
 def _clean_revision(text: str) -> str:
     text = (text or "").strip()
     text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
-    text = re.sub(r"\n?```$", "", text)
+    text = re.sub(r"\n?```$", "", text).strip()
+    # Some backends (Ollama with format=json, or a chatty model) wrap the
+    # sentence in a JSON object like {"rewritten_claim": "..."}; unwrap it.
+    if text.startswith("{") and text.endswith("}"):
+        try:
+            obj = json.loads(text)
+            vals = [v for v in obj.values() if isinstance(v, str) and v.strip()]
+            if vals:
+                text = max(vals, key=len)
+        except Exception:
+            pass
     return text.strip().strip('"').strip("“”").strip()
 
 
@@ -350,7 +372,63 @@ def _derive_from_aspects(checked: list):
     return verdict, unmet
 
 
-def finalize(data: dict, fetched: dict) -> dict:
+# A claim that asserts universal scope ("regardless of design", "in all
+# patients") needs a quote that asserts the same generality. Models often rule
+# such a claim SUPPORTED off a quote that says "most" — the scope backstop
+# below catches that deterministically, whatever the backend.
+_UNIVERSAL_CLAIM_RE = re.compile(
+    r"\b(regardless of|irrespective of|independent(?:ly)? of|in all|across all|"
+    r"for all|in every|every|always|universal(?:ly)?|without exception)\b", re.I)
+_UNIVERSAL_TEXT_RE = re.compile(
+    r"\b(regardless|irrespective|independent(?:ly)? of|all|every|each|always|"
+    r"any|universal(?:ly)?|consistent(?:ly)?|without exception|across)\b", re.I)
+
+
+_SCOPE_STOP = set("a an and the of or in on for to is are was were be by with "
+                  "its their this that these those as at from".split())
+
+
+def _scope_backstop(claim: str, aspects: list, verified: list):
+    """Return a scope aspect to record when a universal claim lacks a quote
+    asserting that generality, else None. Demotes a model's ENTAILED scope
+    aspect whose quote doesn't state the generality."""
+    m = _UNIVERSAL_CLAIM_RE.search(claim or "")
+    if not m:
+        # No universal wording in the claim: a model-invented scope aspect left
+        # unmet (e.g. "essential" read as scope) is noise, not overstatement.
+        # A CONTRADICTED one is real evidence against the claim, so it stays.
+        if claim:
+            aspects[:] = [a for a in aspects
+                          if not (a["type"] == "scope" and a["status"] == "ABSENT")]
+        return None
+    for a in aspects:
+        if a["type"] != "scope":
+            continue
+        if a["status"] in ("CONTRADICTED", "ABSENT"):
+            return None          # the model already ruled the scope unmet
+        if _UNIVERSAL_TEXT_RE.search(a["quote"]):
+            return None          # an ENTAILED scope with a universal quote
+        a["status"], a["quote"] = "ABSENT", ""
+        a["note"] = (a.get("note") or "") + " (quote does not state this generality)"
+        return a
+    # A quote only answers the scope if it states generality ABOUT what the
+    # claim generalizes over: the words right after the qualifier ("regardless
+    # of study DESIGN or FIELD"), or the claim's own words for a bare "always".
+    words = lambda t: set(_norm_alnum(t).split()) - _SCOPE_STOP
+    after = words(" ".join(claim[m.end():].split()[:5]))
+    target, need = (after, 1) if after else (words(claim), 2)
+    quotes = [a["quote"] for a in aspects if a["quote"]] + \
+              [e.get("quote", "") for e in verified]
+    if any(_UNIVERSAL_TEXT_RE.search(q) and len(words(q) & target) >= need
+           for q in quotes):
+        return None
+    a = {"type": "scope", "text": m.group(0), "status": "ABSENT", "quote": "",
+         "note": "the claim asserts universal scope; no verified quote states it"}
+    aspects.append(a)
+    return a
+
+
+def finalize(data: dict, fetched: dict, claim: str = "") -> dict:
     """Apply the quote-verification guard + aspect-derived verdict + confidence
     caps to a raw judgement (from any backend) and return the normalized dict."""
     haystack = _norm(fetched.get("full_text", ""))
@@ -362,6 +440,7 @@ def finalize(data: dict, fetched: dict) -> dict:
             verified.append(ev)
 
     aspects = _check_aspects(data.get("aspects"), haystack)
+    scope_gap = _scope_backstop(claim, aspects, verified)
     aspect_quotes = sum(1 for a in aspects if a["quote"])
 
     result = {
@@ -391,6 +470,21 @@ def finalize(data: dict, fetched: dict) -> dict:
         result["confidence"] = min(result["confidence"],
                                    _VERDICT_CEIL.get(verdict, 1.0))
 
+    # Without aspects to derive from (a terse model), still apply the scope
+    # backstop: a universal claim backed only by non-universal quotes is
+    # OVERSTATED, not SUPPORTED.
+    if scope_gap and result["verdict"] == "SUPPORTED":
+        result.setdefault("verdict_model", data.get("verdict"))
+        result["verdict"] = "OVERSTATED"
+        result["confidence"] = min(result["confidence"], _VERDICT_CEIL["OVERSTATED"])
+    if scope_gap:
+        note = (f"The claim says it holds \"{scope_gap['text']}\", but no verified "
+                "quote states that generality.")
+        if result["distortion_type"] in ("none", "", None):
+            result["distortion_type"] = "other"
+        if note not in result["distortion_note"]:
+            result["distortion_note"] = (result["distortion_note"] + " " + note).strip()
+
     if result["verdict"] in ("SUPPORTED", "OVERSTATED", "UNSUPPORTED") \
             and not verified and not aspect_quotes:
         result["verdict"] = "INSUFFICIENT"
@@ -399,14 +493,21 @@ def finalize(data: dict, fetched: dict) -> dict:
         result["claim_aspects_unmet"].append(
             "No quoted evidence could be verified against the source text.")
 
-    if not fetched.get("has_results"):
+    # Cap confidence when we only saw an abstract. Key off has_fulltext (real
+    # body text, however its sections are named) rather than a literal RESULTS
+    # bucket, so full-text reads under non-standard headings aren't pinned at
+    # 0.5. Fall back to has_results for callers that predate has_fulltext.
+    has_ft = fetched.get("has_fulltext")
+    if has_ft is None:
+        has_ft = fetched.get("has_results", False)
+    if not has_ft:
         result["confidence"] = min(result["confidence"], 0.5)
 
     result["band"] = band(result["confidence"])
     return result
 
 
-def parse_json_verdict(raw_text: str, fetched: dict) -> dict:
+def parse_json_verdict(raw_text: str, fetched: dict, claim: str = "") -> dict:
     """Backend-agnostic: parse a JSON completion (e.g. from sampling), then
     finalize with the quote guard."""
     if not fetched.get("full_text"):
@@ -423,7 +524,7 @@ def parse_json_verdict(raw_text: str, fetched: dict) -> dict:
     except Exception as ex:
         r = no_text_result(f"Could not parse the judge's output as JSON: {ex}")
         return r
-    return finalize(data, fetched)
+    return finalize(data, fetched, claim)
 
 
 # --- api / bedrock backend (fallback when sampling is unavailable) ----------
@@ -487,8 +588,66 @@ def _client_and_model():
     return Anthropic(), config.MODEL
 
 
+# --- local backend: Ollama (same prompt, same guard) -----------------------
+
+def _ollama_chat(system: str, user: str, json_mode: bool = True,
+                 num_predict: int = None) -> str:
+    """Call a local Ollama model's /api/chat and return the message content.
+
+    `think: false` is REQUIRED for gemma "thinking" models — without it they
+    spend the whole num_predict budget on hidden reasoning and return empty
+    content. `format: "json"` asks for a bare JSON object; parse_json_verdict is
+    tolerant of stray prose either way. num_ctx must be large enough to hold the
+    paper text (Ollama's default 4096 would truncate it)."""
+    import urllib.request
+    body = {
+        "model": config.OLLAMA_MODEL,
+        "stream": False,
+        "think": False,
+        "options": {"temperature": 0,
+                    "num_ctx": config.OLLAMA_NUM_CTX,
+                    "num_predict": num_predict or config.OLLAMA_NUM_PREDICT},
+        "messages": [{"role": "system", "content": system},
+                     {"role": "user", "content": user}],
+    }
+    if json_mode:
+        body["format"] = "json"
+    req = urllib.request.Request(
+        config.OLLAMA_URL + "/api/chat",
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=config.OLLAMA_TIMEOUT) as r:
+        return json.loads(r.read()).get("message", {}).get("content", "") or ""
+
+
+def judge_claim_ollama(claim: str, fetched: dict) -> dict:
+    """Judge via a LOCAL Ollama model, then apply the identical Python guard
+    (quote verification + aspect-derived verdict + confidence caps). The model
+    only proposes; finalize() is what makes the verdict trustworthy, so a weak
+    local model cannot fabricate support past the substring check."""
+    if not fetched.get("full_text"):
+        return no_text_result()
+    # Read only the abstract + the claim's best passages (much faster on a
+    # local model); finalize still verifies quotes against the FULL text.
+    focused = dict(fetched, full_text=_focus.focus_text(
+        claim, fetched["full_text"], config.OLLAMA_FOCUS_CHARS))
+    raw = _ollama_chat(sampling_system(), build_user(claim, focused))
+    return parse_json_verdict(raw, fetched, claim)
+
+
+def revise_claim_ollama(claim: str, result: dict) -> str:
+    """Propose a tightened claim via the LOCAL Ollama model (plain text, not
+    JSON mode, so the model returns the sentence itself)."""
+    return _clean_revision(_ollama_chat(_REVISE_SYSTEM,
+                                        build_revise_user(claim, result),
+                                        json_mode=False, num_predict=300))
+
+
 def judge_claim(claim: str, fetched: dict) -> dict:
-    """Direct api/bedrock judgement via forced tool-use."""
+    """Direct judgement. Routes to the local Ollama backend when WYR_USE_OLLAMA
+    is set; otherwise api/bedrock via forced tool-use."""
+    if config.USE_OLLAMA:
+        return judge_claim_ollama(claim, fetched)
     if not fetched.get("full_text"):
         return no_text_result()
     client, model = _client_and_model()
@@ -504,4 +663,4 @@ def judge_claim(claim: str, fetched: dict) -> dict:
             break
     if not data:
         raise RuntimeError("Judge returned no structured verdict.")
-    return finalize(data, fetched)
+    return finalize(data, fetched, claim)

@@ -1,0 +1,16 @@
+{
+  "manifest_version": 2,
+  "name": "Worth Your Read",
+  "version": "0.1.0",
+  "description": "Grounded, quote-verified answers and citation checks for your papers — 100% local.",
+  "author": "Worth Your Read",
+  "icons": { "48": "content/icon.svg", "96": "content/icon.svg" },
+  "applications": {
+    "zotero": {
+      "id": "worth-your-read@local",
+      "update_url": "https://localhost/worth-your-read/updates.json",
+      "strict_min_version": "7.0",
+      "strict_max_version": "10.*"
+    }
+  }
+}

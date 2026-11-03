@@ -1,0 +1,10 @@
+wyr-section-head =
+    .label = Worth Your Read
+wyr-section-sidenav =
+    .tooltiptext = Worth Your Read
+wyr-menu-check-draft =
+    .label = Check citations with Worth Your Read
+wyr-menu-research =
+    .label = Research a question with Worth Your Read…
+wyr-menu-similar =
+    .label = Find similar papers with Worth Your Read

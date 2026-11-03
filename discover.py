@@ -59,12 +59,28 @@ def _headers():
     return {"User-Agent": config.USER_AGENT, "Accept": "application/json"}
 
 
+class RateLimited(Exception):
+    """A provider refused for rate limiting; `retry_after` is in seconds."""
+
+    def __init__(self, url, retry_after):
+        super().__init__(f"rate limited by {url.split('/')[2]} (retry after {retry_after}s)")
+        self.retry_after = retry_after
+
+
 def _get_json(url, params):
     # Polite-pool contact only for OpenAlex/Crossref, and only when configured.
     if config.CONTACT_EMAIL and "mailto" not in params and url in (OPENALEX, CROSSREF):
         params = {**params, "mailto": config.CONTACT_EMAIL}
+    if config.OPENALEX_API_KEY and url == OPENALEX:
+        params = {**params, "api_key": config.OPENALEX_API_KEY}
     r = requests.get(url, params=params, headers=_headers(),
                      timeout=config.HTTP_TIMEOUT)
+    if r.status_code == 429:
+        try:
+            wait = int(r.headers.get("retry-after", "60"))
+        except ValueError:
+            wait = 60
+        raise RateLimited(url, wait)
     r.raise_for_status()
     return r.json()
 
@@ -313,3 +329,48 @@ def discover_sources(raw_query, n=3, scope=None, peer_reviewed_only=False,
     if peer_reviewed_only:
         cands = [c for c in cands if not _PREPRINT_RE.search(c.get("type") or "")]
     return cands[:n]
+
+
+# --- cheap triage before full verification ---------------------------------
+# Fully verifying a candidate means fetching its full text and running the
+# judge — about a minute each on a local model. Triage ranks candidates by how
+# well their title + abstract match the claim (one batched OpenAlex request,
+# BM25, no model) so only the most promising few are fully verified.
+
+def _abstract_from_index(inv):
+    if not inv:
+        return ""
+    pos = sorted((i, w) for w, idxs in inv.items() for i in idxs)
+    return " ".join(w for _, w in pos)
+
+
+def fetch_abstracts(dois):
+    """{doi: abstract} for up to 50 DOIs in one OpenAlex request; best-effort."""
+    dois = [clean_doi(d) for d in dois if d][:50]
+    if not dois:
+        return {}
+    try:
+        j = _get_json(OPENALEX, {"filter": "doi:" + "|".join(dois),
+                                 "select": "doi,abstract_inverted_index",
+                                 "per-page": len(dois)})
+    except Exception:
+        return {}
+    return {clean_doi(w.get("doi")): _abstract_from_index(w.get("abstract_inverted_index"))
+            for w in j.get("results") or [] if w.get("doi")}
+
+
+def triage(claim, cands, keep):
+    """Return the `keep` candidates whose title + abstract best match the claim,
+    best first. Candidates whose text shares nothing with the claim are dropped
+    even if that leaves fewer than `keep`."""
+    from .focus import bm25_rank
+    abstracts = fetch_abstracts([c.get("doi") for c in cands])
+    docs = [f"{c.get('title') or ''} {abstracts.get(clean_doi(c.get('doi')) or '', '')}"
+            for c in cands]
+    scores = bm25_rank(claim, docs)
+    for c, s, d in zip(cands, scores, docs):
+        c["triage_score"] = round(s, 2)
+        c["has_abstract"] = len(d) > len(c.get("title") or "") + 1
+    ranked = sorted((c for c in cands if c["triage_score"] > 0),
+                    key=lambda c: -(c["triage_score"] + 0.5 * (c.get("_score") or 0)))
+    return ranked[:keep]

@@ -1,0 +1,316 @@
+"""Offline tests for the guard, focus, local-library and sidecar plumbing.
+No model and no network: run with `python -m pytest worth_your_read/tests`."""
+import json
+
+import pytest
+
+from worth_your_read import answer, fetch, focus, judge, library, store
+
+QUOTE = ("for most study designs and settings, it is more likely for a research "
+         "claim to be false than true")
+PAGES = ["Essay\nWhy Most Published Research Findings Are False\nSummary " + QUOTE + ".",
+         "Results\nThe probability that a finding is true depends on power and bias.",
+         "Corollary 1: The smaller the studies conducted, the less likely the "
+         "research findings are to be true."]
+
+
+def _fetched():
+    out = {"sections": {"abstract": PAGES[0], "results": PAGES[1] + " " + PAGES[2]},
+           "source": "zotero_fulltext", "open_access": False}
+    return fetch.assemble(out)
+
+
+def _supported(quote=QUOTE):
+    return {"verdict": "SUPPORTED", "confidence": 1.0,
+            "aspects": [{"type": "outcome", "text": "findings false",
+                         "status": "ENTAILED", "quote": quote}],
+            "evidence": [{"quote": quote, "stance": "ENTAILS"}]}
+
+
+# --- scope backstop -------------------------------------------------------------
+
+def test_universal_claim_backed_by_most_is_overstated():
+    r = judge.finalize(_supported(), _fetched(),
+                       "Most findings are false, regardless of study design or field.")
+    assert r["verdict"] == "OVERSTATED"
+    assert r["confidence"] <= 0.6
+    assert any(a["type"] == "scope" and a["status"] == "ABSENT" for a in r["aspects"])
+
+
+def test_faithful_scope_stays_supported():
+    r = judge.finalize(_supported(), _fetched(),
+                       "For most study designs, a claim is more likely false than true.")
+    assert r["verdict"] == "SUPPORTED"
+
+
+def test_scope_backstop_ignores_all_cause():
+    assert judge._UNIVERSAL_CLAIM_RE.search("Statins reduce all-cause mortality") is None
+
+
+def test_invented_scope_on_plain_claim_is_ignored():
+    data = _supported()
+    data["aspects"].append({"type": "scope", "text": "essential", "status": "ABSENT", "quote": ""})
+    r = judge.finalize(data, _fetched(), "For most study designs, claims are likely false.")
+    assert r["verdict"] == "SUPPORTED"
+
+
+def test_model_scope_contradiction_is_kept():
+    data = _supported()
+    data["aspects"].append({"type": "scope", "text": "regardless of design",
+                            "status": "CONTRADICTED", "quote": QUOTE})
+    r = judge.finalize(data, _fetched(), "Findings are false regardless of design.")
+    assert r["verdict"] == "OVERSTATED"
+
+
+def test_fabricated_quote_still_insufficient():
+    r = judge.finalize(_supported("a sentence that is nowhere in this paper at all"),
+                       _fetched(), "Most findings are false.")
+    assert r["verdict"] == "INSUFFICIENT"
+
+
+# --- revise unwrapping --------------------------------------------------------------
+
+@pytest.mark.parametrize("raw", ['{"rewritten_claim": "X holds for most designs."}',
+                                 '```\nX holds for most designs.\n```',
+                                 '"X holds for most designs."'])
+def test_clean_revision(raw):
+    assert judge._clean_revision(raw) == "X holds for most designs."
+
+
+# --- focus ---------------------------------------------------------------------------
+
+def test_focus_keeps_relevant_passage_and_fits_budget():
+    filler = " ".join(f"Unrelated sentence number {i} about methods." for i in range(400))
+    text = (f"## ABSTRACT\nShort abstract.\n## RESULTS\n{filler} "
+            f"Corollary 1: The smaller the studies, the less likely findings are true. {filler}")
+    out = focus.focus_text("smaller studies less likely true", text, 3000)
+    assert len(out) <= 3200
+    assert "Corollary 1" in out and "Short abstract." in out
+
+
+def test_focus_returns_short_text_unchanged():
+    assert focus.focus_text("q", "## ABSTRACT\nshort", 12000) == "## ABSTRACT\nshort"
+
+
+# --- local library ------------------------------------------------------------------
+
+def test_library_reads_zotero_cache_and_locates_pages(tmp_path, monkeypatch):
+    key = "ABCD1234"
+    d = tmp_path / "storage" / key
+    d.mkdir(parents=True)
+    (d / library.FT_CACHE).write_text("\f".join(PAGES), encoding="utf-8")
+    monkeypatch.setenv("WYR_ZOTERO_DIR", str(tmp_path))
+    f = library.load(attachment_key=key)
+    assert f["source"] == "zotero_fulltext" and len(f["pages"]) == 3
+    assert library.page_of(QUOTE, f["pages"]) == 1
+    assert library.page_of("the less likely the research findings are to be true", f["pages"]) == 3
+    assert library.page_of("never written anywhere in these pages", f["pages"]) is None
+
+
+# --- grounded answers ------------------------------------------------------------------
+
+def test_answer_marks_ungrounded_claims(monkeypatch):
+    raw = json.dumps({"claims": [
+        {"claim": "Most claims are likely false for most designs.", "quotes": [QUOTE]},
+        {"claim": "The author recommends banning p-values.", "quotes": ["p-values must be banned outright"]},
+    ], "not_addressed": ["funding"]})
+    monkeypatch.setattr(answer, "_complete", lambda s, u: raw)
+    r = answer.ask("What does it argue?", _fetched())
+    assert [c["status"] for c in r["claims"]] == ["GROUNDED", "UNGROUNDED"]
+    assert r["grounded"] == 1 and r["ungrounded"] == 1
+    assert 0 < r["confidence"] <= 0.7
+    html = answer.note_html(r, "Ioannidis 2005")
+    assert "Not verified against the text" in html and "banning" in html
+
+
+# --- disk cache + sidecar --------------------------------------------------------------
+
+def test_store_roundtrip_skips_failed_fetch(tmp_path, monkeypatch):
+    monkeypatch.setattr(store.config, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(store, "_conn", None)
+    store.enable()
+    store.put("10.1/x", {"source": "pmc_bioc", "full_text": "t"})
+    store.put("10.1/none", {"source": "none"})
+    assert store.get("10.1/X")["full_text"] == "t"
+    assert store.get("10.1/none") is None
+    monkeypatch.setattr(store, "_conn", None)
+
+
+def test_sidecar_requires_token_and_runs_plan_job(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from worth_your_read import sidecar
+    monkeypatch.setattr(store.config, "DATA_DIR", str(tmp_path))
+    c = TestClient(sidecar.app)
+    assert c.get("/health").status_code == 401
+    h = {"X-WYR-Token": sidecar.token()}
+    assert c.get("/health", headers=h).json()["ok"] is True
+    assert c.post("/jobs", json={"kind": "nope"}, headers=h).status_code == 400
+    job = c.post("/jobs", json={"kind": "plan", "args": {"question": "Does metformin slow aging?"}},
+                 headers=h).json()
+    for _ in range(50):
+        j = c.get(f"/jobs/{job['job_id']}", headers=h).json()
+        if j["status"] in ("done", "error"):
+            break
+    assert j["status"] == "done" and j["result"]["mode"] == "clarify"
+
+
+# --- locating quotes on the page -----------------------------------------------------
+
+def test_find_span_exact_fuzzy_and_missing():
+    toks = "the smaller the studies conducted in a field the less likely findings are true".split()
+    q = "smaller the studies conducted in a field".split()
+    assert library._find_span(q, toks) == (1, 8)
+    # one word differs (extraction noise) -> still found by the fuzzy window
+    assert library._find_span("smaller the studys conducted in a field".split(), toks) is not None
+    assert library._find_span("nothing like this appears here".split(), toks) is None
+
+
+def test_locate_quotes_without_pdf_reports_not_found(tmp_path, monkeypatch):
+    monkeypatch.setenv("WYR_ZOTERO_DIR", str(tmp_path))
+    assert library.locate_quotes(["any quote here"], attachment_key="NOPE") == \
+        [{"text": "any quote here", "found": False}]
+
+
+# --- research snowball (fake citation graph, no network) -----------------------------
+
+from worth_your_read import research
+
+_TOPIC = "statistical power and false positive research findings"
+_GRAPH = {   # id: (title, refs, cited_by)
+    "A": ("Statistical power and false positive research findings", ["C", "D"], []),
+    "B": ("Why false positive findings dominate underpowered research", [], ["E"]),
+    "C": ("Low statistical power undermines research findings reliability", ["F"], []),
+    "D": ("A history of the printing press in Europe", [], []),
+    "E": ("Replication shows false positive rates rise with low power", [], []),
+    "F": ("Power analysis and the false positive rate of published findings", [], []),
+}
+
+
+def _w(i):
+    t, refs, _ = _GRAPH[i]
+    return {"id": i, "doi": f"10.1/{i.lower()}", "title": t, "year": 2020, "cited_by": 1,
+            "type": "article", "is_oa": True, "retracted": False, "abstract": t, "refs": list(refs)}
+
+
+@pytest.fixture
+def fake_graph(monkeypatch):
+    monkeypatch.setattr(research, "seed_works", lambda q, dois, n: [_w("A"), _w("B"), _w("D")])
+    monkeypatch.setattr(research, "fetch_works", lambda ids=(), dois=(): [_w(i) for i in ids if i in _GRAPH])
+    # Batched like OpenAlex: works citing any of the ids; a citing work's own
+    # reference list says which of them it cites.
+    monkeypatch.setattr(research, "fetch_citing",
+                        lambda ids, k: [{**_w(c), "refs": _w(c)["refs"] + [pid]}
+                                        for pid in ids for c in _GRAPH[pid][2]])
+    # The "model": relevant unless it's about printing presses.
+    return lambda q, papers: {i for i, p in enumerate(papers) if "printing" not in p["title"]}
+
+
+def test_snowball_follows_refs_and_citations_until_exhausted(fake_graph):
+    seen_progress = []
+    r = research.snowball(_TOPIC, screen=fake_graph, progress=seen_progress.append)
+    ids = [p["id"] for p in r["papers"]]
+    assert set(ids) == {"A", "B", "C", "E", "F"}          # D screened out
+    assert r["stopped"] == "exhausted"
+    by = {p["id"]: p for p in r["papers"]}
+    assert by["C"]["round"] == 1 and by["F"]["round"] == 2  # paper -> ref -> paper -> ref
+    assert by["E"]["via"] == [{"from": "B", "rel": "cites"}]
+    assert by["F"]["via"] == [{"from": "C", "rel": "referenced by"}]
+    assert [x["accepted"] for x in r["rounds"]][-1] == 0      # last round found nothing new
+    assert seen_progress and seen_progress[0]["stage"] == "seeds"
+
+
+def test_snowball_reports_cap_instead_of_exhaustion(fake_graph):
+    r = research.snowball(_TOPIC, screen=fake_graph, max_papers=3)
+    assert r["stopped"] == "max_papers" and len(r["papers"]) == 3
+    assert "cap" in r["summary"]
+
+
+def test_snowball_admits_heavily_cocited_paper_with_low_model_score(fake_graph, monkeypatch):
+    # G is referenced by A, B, C and F (4 accepted papers) but the model rates it 1.
+    for k in "ABCF":
+        _GRAPH[k][1].append("G") if k != "B" else _GRAPH["B"][2].append("G")
+    _GRAPH["G"] = ("Targeting aging with a drug: trial rationale", [], [])
+    try:
+        screen = lambda q, ps: {i: (1 if p["id"] == "G" else 0 if "printing" in p["title"] else 3)
+                                for i, p in enumerate(ps)}
+        r = research.snowball(_TOPIC, screen=screen)
+        assert "G" in {p["id"] for p in r["papers"]}
+    finally:
+        for k in "ACF":
+            _GRAPH[k][1].remove("G")
+        _GRAPH["B"][2].remove("G")
+        del _GRAPH["G"]
+
+
+def test_chain_of_weak_matches_is_not_followed_forever(fake_graph, monkeypatch):
+    # A -> C -> F -> H, every paper rated 2 (related, not the question itself):
+    # C is 1 hop from the seeds and expanded; F (2 hops, one citation link) is set
+    # aside, so H is never fetched.
+    _GRAPH["F"][1].append("H")
+    _GRAPH["H"] = ("Power and false positive findings in a further field", ["I"], [])
+    _GRAPH["I"] = ("Power and false positive findings, further still", [], [])
+    try:
+        screen = lambda q, ps: {i: (0 if "printing" in p["title"] else 2) for i, p in enumerate(ps)}
+        r = research.snowball(_TOPIC, screen=screen)
+        by = {p["id"]: p for p in r["papers"]}
+        assert by["C"]["hops"] == 1 and "F" not in by and "H" not in by
+        assert r["stopped"] == "exhausted" and "set aside" in r["summary"]
+    finally:
+        _GRAPH["F"][1].remove("H")
+        del _GRAPH["H"], _GRAPH["I"]
+
+
+def test_duplicate_records_and_correction_notices_are_collapsed(fake_graph, monkeypatch):
+    # OpenAlex holds A again as a reprint (A2) plus a correction notice (A3).
+    _GRAPH["A2"] = (_GRAPH["A"][0], [], [])
+    _GRAPH["A3"] = ("Correction: " + _GRAPH["A"][0], [], [])
+    _GRAPH["C"][1].extend(["A2", "A3"])
+    try:
+        r = research.snowball(_TOPIC, screen=fake_graph)
+        ids = {p["id"] for p in r["papers"]}
+        assert "A" in ids and not {"A2", "A3"} & ids
+    finally:
+        _GRAPH["C"][1].remove("A2"); _GRAPH["C"][1].remove("A3")
+        del _GRAPH["A2"], _GRAPH["A3"]
+
+
+def test_semantic_score_relates_synonyms_that_word_overlap_misses():
+    from worth_your_read import semantic
+    if not semantic.available():
+        pytest.skip("scikit-learn not installed")
+    docs = ["Metformin reduces all-cause mortality and diseases of ageing in older adults",
+            "Metformin lowers all-cause mortality in an ageing cohort followed for a decade",
+            "Metformin inhibits melanoma cell growth through autophagy",
+            "A history of the printing press in Europe"]
+    query = "Does metformin extend lifespan? " + docs[0]
+    s = semantic.semantic_scores(query, docs[1:])
+    assert s[0] > s[1] > s[2] and all(0 <= x <= 1 for x in s)
+
+
+def test_snowball_same_result_with_semantic_stage_or_word_overlap(fake_graph):
+    from worth_your_read import semantic
+    runs = [research.snowball(_TOPIC, screen=fake_graph, semantic=False)]
+    if semantic.available():
+        runs.append(research.snowball(_TOPIC, screen=fake_graph, semantic=True))
+    for r in runs:
+        assert {p["id"] for p in r["papers"]} == {"A", "B", "C", "E", "F"}
+
+
+def test_rate_limit_is_never_reported_as_exhausted(fake_graph, monkeypatch):
+    from worth_your_read import discover
+    def limited(ids, k):
+        raise discover.RateLimited("https://api.openalex.org/works", 1200)
+    monkeypatch.setattr(research, "fetch_citing", limited)
+    r = research.snowball(_TOPIC, screen=fake_graph)
+    assert r["stopped"] == "rate_limited" and r["retry_after"] == 1200
+    assert "exhausted" not in r["summary"].lower() and "20 min" in r["summary"]
+    assert {p["id"] for p in r["papers"]} >= {"A", "B"}      # partial results kept
+
+
+def test_failed_requests_mark_search_incomplete(fake_graph, monkeypatch):
+    def flaky(ids=(), dois=()):
+        research._errors.append("HTTPError: 500")
+        return [_w(i) for i in ids if i in _GRAPH]
+    monkeypatch.setattr(research, "fetch_works", flaky)
+    r = research.snowball(_TOPIC, screen=fake_graph)
+    assert r["stopped"] == "incomplete"

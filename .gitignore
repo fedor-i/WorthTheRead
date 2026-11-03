@@ -19,3 +19,6 @@ benchmark/adapters/scifact_data/
 
 # Claude Code tooling / agent worktrees
 .claude/
+
+# Zotero plugin build output
+zotero-plugin/build/
