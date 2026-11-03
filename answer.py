@@ -36,14 +36,14 @@ SUMMARY_QUESTION = (
     "the limitations the authors state.")
 
 
-def _complete(system: str, user: str) -> str:
+def _complete(system: str, user: str, max_tokens: int = 1500) -> str:
     """One completion on the configured backend: local Ollama, else the
     Anthropic API / Bedrock."""
     if config.USE_OLLAMA:
-        return _judge._ollama_chat(system, user, num_predict=1500)
+        return _judge._ollama_chat(system, user, num_predict=max_tokens)
     client, model = _judge._client_and_model()
     msg = client.messages.create(
-        model=model, max_tokens=1500, system=system, temperature=0,
+        model=model, max_tokens=max_tokens, system=system, temperature=0,
         messages=[{"role": "user", "content": user}])
     return "".join(getattr(b, "text", "") for b in msg.content
                    if getattr(b, "type", None) == "text")
@@ -56,7 +56,20 @@ def _parse(raw: str) -> dict:
     try:
         return json.loads(raw[s:e + 1]) if s != -1 and e != -1 else {}
     except Exception:
-        return {}
+        return _salvage(raw)
+
+
+def _salvage(raw: str) -> dict:
+    """An answer cut off by the token limit is invalid JSON as a whole, but the
+    claims before the cut are complete objects: keep those."""
+    dec, claims = json.JSONDecoder(), []
+    for m in re.finditer(r'\{\s*"claim"', raw):
+        try:
+            obj, _ = dec.raw_decode(raw, m.start())
+            claims.append(obj)
+        except ValueError:
+            pass
+    return {"claims": claims, "truncated": True} if claims else {"truncated": bool(raw)}
 
 
 def ask(question: str, fetched: dict, check: bool = False) -> dict:
@@ -98,6 +111,143 @@ def ask(question: str, fetched: dict, check: bool = False) -> dict:
 
     _score_answer(out, check)
     return out
+
+
+# --- one question across several papers ---------------------------------------
+# Map, then merge. Each paper is asked on its own (the single-paper `ask`, whose
+# quotes are checked against that paper), then one call merges the per-paper
+# claims into a synthesis. The merge only points at claim ids — it never writes
+# quotes — so every passage in the answer is one already verified in the paper
+# it's attributed to. A local model given all the papers in one prompt tends to
+# answer from the first obvious one; asked one at a time, every paper speaks.
+
+MAX_PAPERS = 12        # each paper is one model call; beyond this it gets slow
+
+_MERGE_SYSTEM = """You merge findings from SEVERAL papers into one answer to a \
+QUESTION. You get numbered CLAIMS, each already checked against the paper in \
+brackets ([P1], [P2], ...). Use ONLY these claims; never add outside knowledge.
+
+Write at most 10 short answer claims in plain language, ordered so they answer \
+the question. When claims from different papers agree, merge them into one \
+answer claim that lists all their ids. When papers disagree or differ \
+(population, method, estimate, conclusion), keep that visible: a separate \
+answer claim per side, or one that states the disagreement and lists both \
+sides' ids. Keep numbers and caveats as the claims state them. Every answer \
+claim must list the ids it rests on, and must not say more than those claims \
+say. If part of the question is answered by no claim, say so in "not_addressed".
+
+Return ONLY a JSON object: {"claims": [{"claim": "...", "from": ["C1", "C4"]}], \
+"not_addressed": ["..."]}"""
+
+
+def _rank_papers(question: str, papers: list) -> list:
+    """Indices of `papers` ordered by how much of their text bears on the question."""
+    docs = [(p.get("fetched") or {}).get("full_text") or "" for p in papers]
+    scores = _focus.bm25_rank(question, [_focus.focus_text(question, d, 4000) for d in docs])
+    return sorted(range(len(papers)), key=lambda i: -scores[i])
+
+
+def ask_many(question: str, papers: list, progress=None) -> dict:
+    """Answer `question` from several papers at once.
+
+    `papers` is a list of {"label", "fetched", "pages"?, "key"?}. Returns
+    {question, claims: [{claim, status, sources: [{paper, quote, verified,
+    page}]}], papers: [{n, label, key, cited, abstract_only, used, error?}],
+    skipped, not_addressed, merged, confidence, band, grounded, ungrounded}."""
+    report = lambda **kw: progress and progress(kw)
+    readable = [p for p in papers if (p.get("fetched") or {}).get("full_text")]
+    out = {"question": question, "claims": [], "not_addressed": [], "papers": [],
+           "skipped": [p.get("label", "") for p in papers if p not in readable],
+           "merged": False, "confidence": 0.0, "band": "Low", "grounded": 0, "ungrounded": 0}
+    if not readable:
+        out["not_addressed"] = ["None of the papers had readable text."]
+        return out
+    order = _rank_papers(question, readable)
+    out["skipped"] += [readable[i].get("label", "") for i in order[MAX_PAPERS:]]
+    chosen = [readable[i] for i in sorted(order[:MAX_PAPERS])]   # keep the user's order
+
+    # Map: each paper on its own.
+    found, gaps = [], []           # found: (paper n, claim text, [verified quotes])
+    for n, p in enumerate(chosen, 1):
+        report(stage="paper", paper=n, papers=len(chosen), label=p.get("label", ""))
+        info = {"n": n, "label": p.get("label", ""), "key": p.get("key", ""), "cited": 0,
+                "used": False, "abstract_only": not p["fetched"].get("has_fulltext")}
+        try:
+            r = ask(question, p["fetched"])
+            for c in r["claims"]:
+                quotes = [q["text"] for q in c["quotes"] if q["verified"]]
+                if quotes:
+                    found.append((n, c["claim"], quotes))
+            gaps += r["not_addressed"]
+        except Exception as e:
+            info["error"] = f"{type(e).__name__}: {e}"
+        out["papers"].append(info)
+
+    def source(n, quote):
+        return {"paper": n, "quote": quote, "verified": True, "reattributed": False,
+                "page": _library_page(quote, chosen[n - 1].get("pages"))}
+
+    # Merge: one call over the verified per-paper claims.
+    merged, used = [], set()
+    if len(found) > 1:
+        report(stage="merge", papers=len(chosen), claims=len(found))
+        listing = "\n".join(f"C{i} [P{n}] {text}" for i, (n, text, _) in enumerate(found, 1))
+        titles = "\n".join(f"[P{n}] {p.get('label', '')}" for n, p in enumerate(chosen, 1))
+        try:
+            data = _parse(_complete(_MERGE_SYSTEM, f"QUESTION:\n{question}\n\nPAPERS:\n{titles}"
+                                    f"\n\nCLAIMS:\n{listing}", max_tokens=2000))
+        except Exception:
+            data = {}
+        out["truncated"] = bool(data.get("truncated"))
+        for c in data.get("claims") or []:
+            if not isinstance(c, dict) or not (c.get("claim") or "").strip():
+                continue
+            ids = []
+            for ref in c.get("from") or []:
+                m = re.search(r"\d+", str(ref))
+                if m and 1 <= int(m.group(0)) <= len(found) and int(m.group(0)) - 1 not in ids:
+                    ids.append(int(m.group(0)) - 1)
+            sources = [source(found[i][0], q) for i in ids for q in found[i][2]]
+            used.update(ids)
+            # The model echoes "[P1, P3]"; the citations come from `sources`.
+            text = re.sub(r"\s*\[(?:P\d+[,;\s]*)+\]", "", c["claim"]).strip()
+            merged.append({"claim": text, "sources": sources, "extra": False,
+                           "status": "GROUNDED" if sources else "UNGROUNDED"})
+        out["not_addressed"] = [x for x in data.get("not_addressed") or []
+                                if isinstance(x, str) and x.strip()]
+        out["merged"] = bool(merged)
+    else:
+        out["not_addressed"] = gaps[:3]
+    # Per-paper findings the merge didn't use are kept, not dropped.
+    for i, (n, text, quotes) in enumerate(found):
+        if i not in used:
+            merged.append({"claim": text, "sources": [source(n, q) for q in quotes],
+                           "status": "GROUNDED", "extra": out["merged"]})
+    out["claims"] = merged
+
+    for c in merged:
+        for n in {s["paper"] for s in c["sources"]}:
+            out["papers"][n - 1]["cited"] += 1
+    for info in out["papers"]:
+        info["used"] = info["cited"] > 0
+    out["grounded"] = sum(1 for c in merged if c["status"] == "GROUNDED")
+    out["ungrounded"] = len(merged) - out["grounded"]
+    if merged:
+        # Passages are real, but nothing has judged each claim against them:
+        # cap below "High", as for a single unchecked answer.
+        conf = min(0.7, out["grounded"] / len(merged))
+        if all(p["abstract_only"] for p in out["papers"] if p["used"]):
+            conf = min(conf, 0.5)
+        out["confidence"] = round(conf, 2)
+        out["band"] = _judge.band(out["confidence"])
+    return out
+
+
+def _library_page(quote: str, pages):
+    if not pages:
+        return None
+    from . import library
+    return library.page_of(quote, pages)
 
 
 def _score_answer(out: dict, checked: bool) -> None:

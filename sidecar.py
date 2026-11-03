@@ -106,6 +106,23 @@ def _verify(args: dict) -> dict:
     return r
 
 
+def _ask_many(args: dict) -> dict:
+    papers, failed = [], []
+    for spec in args.get("papers", []):
+        paper = Paper(**spec)
+        label = spec.get("label") or paper.title or paper.reference or paper.attachment_key
+        try:
+            fetched, pages, _ = _load(paper)
+        except Exception:
+            failed.append(label)
+            continue
+        papers.append({"label": label, "key": spec.get("item_key", ""),
+                       "fetched": fetched, "pages": pages})
+    r = _answer.ask_many(args["question"], papers, progress=args.get("_progress"))
+    r["skipped"] = failed + r["skipped"]
+    return r
+
+
 def _ask(args: dict) -> dict:
     fetched, pages, _ = _load(Paper(**args.get("paper", {})))
     r = _answer.ask(args["question"], fetched, check=bool(args.get("check")))
@@ -159,7 +176,8 @@ def _plan(args: dict) -> dict:
 
 KINDS = {"verify": _verify, "ask": _ask, "summarize": _summarize,
          "revise": _revise, "suggest": _suggest, "find": _find, "plan": _plan,
-         "locate": _locate, "research": _research}
+         "locate": _locate, "research": _research,
+         "ask_many": _ask_many}
 
 
 # --- jobs ----------------------------------------------------------------------

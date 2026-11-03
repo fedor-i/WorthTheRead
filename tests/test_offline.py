@@ -123,6 +123,69 @@ def test_answer_marks_ungrounded_claims(monkeypatch):
     assert "Not verified against the text" in html and "banning" in html
 
 
+def _paper(label, text, full=True):
+    return {"label": label, "fetched": {"full_text": text, "has_fulltext": full}}
+
+
+_A_TEXT = "Metformin lowered all-cause mortality by 12% in the treated arm. Adverse events were mild."
+_B_TEXT = "Among older adults, metformin users lived longer than matched controls."
+
+
+def _fake_model(merge_reply):
+    """Per-paper answers keyed on the paper text; the merge returns `merge_reply`."""
+    def complete(system, user, max_tokens=1500):
+        if system == answer._MERGE_SYSTEM:
+            return merge_reply
+        if "lowered all-cause mortality" in user:
+            return json.dumps({"claims": [
+                {"claim": "Mortality fell by 12%.", "quotes": ["Metformin lowered all-cause mortality by 12%"]},
+                {"claim": "It doubled lifespan.", "quotes": ["metformin doubled lifespan"]}]})
+        return json.dumps({"claims": [
+            {"claim": "Users lived longer.", "quotes": ["metformin users lived longer than matched controls"]}]})
+    return complete
+
+
+def test_ask_many_asks_each_paper_then_merges_by_claim_id(monkeypatch):
+    merge = json.dumps({"claims": [
+        {"claim": "Metformin was linked to lower mortality and longer life [P1, P2].", "from": ["C1", "C2"]},
+        {"claim": "It cures ageing.", "from": ["C9"]}],             # points at nothing
+        "not_addressed": ["cost"]})
+    monkeypatch.setattr(answer, "_complete", _fake_model(merge))
+    seen = []
+    r = answer.ask_many("Does metformin extend life?",
+                        [_paper("Trial A", _A_TEXT), _paper("Cohort B", _B_TEXT), _paper("Empty", "")],
+                        progress=seen.append)
+    first = r["claims"][0]
+    assert first["status"] == "GROUNDED" and {s["paper"] for s in first["sources"]} == {1, 2}
+    assert first["claim"] == "Metformin was linked to lower mortality and longer life."
+    assert r["claims"][1]["status"] == "UNGROUNDED"
+    # the fabricated per-paper quote ("doubled lifespan") never reaches the answer
+    assert "doubled" not in json.dumps(r["claims"])
+    assert r["merged"] and r["skipped"] == ["Empty"] and all(p["used"] for p in r["papers"])
+    assert [p["stage"] for p in seen] == ["paper", "paper", "merge"] and r["not_addressed"] == ["cost"]
+    assert 0 < r["confidence"] <= 0.7
+
+
+def test_ask_many_keeps_findings_the_merge_drops_or_garbles(monkeypatch):
+    # The merge uses only C1 and is cut off mid-way: C2 must still be in the answer.
+    cut = '{"claims": [{"claim": "Mortality fell.", "from": ["C1"]}, {"claim": "Users li'
+    monkeypatch.setattr(answer, "_complete", _fake_model(cut))
+    r = answer.ask_many("Does metformin extend life?", [_paper("Trial A", _A_TEXT), _paper("Cohort B", _B_TEXT)])
+    assert r["truncated"] and [c["claim"] for c in r["claims"]] == ["Mortality fell.", "Users lived longer."]
+    assert [c["extra"] for c in r["claims"]] == [False, True]     # the dropped one is marked as extra
+    # Unreadable merge output: the per-paper findings are the answer.
+    monkeypatch.setattr(answer, "_complete", _fake_model("not json at all"))
+    r = answer.ask_many("Does metformin extend life?", [_paper("Trial A", _A_TEXT), _paper("Cohort B", _B_TEXT)])
+    assert not r["merged"] and len(r["claims"]) == 2 and r["grounded"] == 2
+
+
+def test_ask_many_caps_papers_and_reports_the_rest(monkeypatch):
+    monkeypatch.setattr(answer, "_complete", lambda s, u, max_tokens=1500: "{}")
+    papers = [_paper(f"P{i}", "metformin lifespan " * (i + 1)) for i in range(answer.MAX_PAPERS + 3)]
+    r = answer.ask_many("metformin lifespan", papers)
+    assert len(r["papers"]) == answer.MAX_PAPERS and len(r["skipped"]) == 3
+
+
 # --- disk cache + sidecar --------------------------------------------------------------
 
 def test_store_roundtrip_skips_failed_fetch(tmp_path, monkeypatch):

@@ -64,6 +64,10 @@ def load(pdf_path: str = "", attachment_key: str = "") -> dict:
         text = "\n".join(pages)
         out["sections"] = _fetch._text_sections(text) or {"other": text}
     _fetch.assemble(out)
+    # A whole PDF is never "just an abstract", even when its headings don't
+    # map to sections (letters, commentaries: the body can land in "supplement").
+    if out["source"] != "none" and sum(len(t) for t in out["sections"].values()) >= 5000:
+        out["has_fulltext"] = True
     return out
 
 

@@ -188,6 +188,15 @@ const Client = {
 
 // --- small helpers ------------------------------------------------------------
 
+/** "Ioannidis 2005 — Why most published research…" for lists and prompts. */
+function shortLabel(item) {
+  const year = Zotero.Date.strToDate(item.getField("date") || "").year;
+  // firstCreator wraps names in invisible bidi isolates (U+2068/U+2069).
+  const who = [item.firstCreator.replace(/[\u2066-\u2069]/g, ""), year].filter(Boolean).join(" ");
+  const title = item.getDisplayTitle();
+  return (who ? `${who} — ` : "") + (title.length > 70 ? title.slice(0, 67) + "…" : title);
+}
+
 function titleKey(title) {
   return (title || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 }
@@ -283,6 +292,7 @@ Zotero.WorthYourRead = {
   bodies: new Map(),      // item id -> last rendered section body
   drafts: new Map(),      // note id -> draft-check state (rendered in a tab)
   researches: [],         // research-tab states
+  askManys: [],           // ask-across-papers tab states
   researchMenuIDs: [],
 
   async startup({ id, rootURI }) {
@@ -316,6 +326,31 @@ Zotero.WorthYourRead = {
           onCommand: () => this.openResearch({}) }],
       }),
       Zotero.MenuManager?.registerMenu({
+        menuID: "wyr-new-manuscript", pluginID: id, target: "main/menubar/tools",
+        menus: [{ menuType: "menuitem", l10nID: "wyr-menu-new-manuscript",
+          onCommand: () => this.newManuscript() }],
+      }),
+      Zotero.MenuManager?.registerMenu({
+        menuID: "wyr-new-manuscript-collection", pluginID: id, target: "main/library/collection",
+        menus: [{ menuType: "menuitem", l10nID: "wyr-menu-new-manuscript", icon: rootURI + "content/icon.svg",
+          onShowing: (event, ctx) => ctx.setVisible(ctx.collectionTreeRows?.length === 1
+            && ctx.collectionTreeRows[0].isCollection()),
+          onCommand: (event, ctx) => this.newManuscript(ctx.collectionTreeRows[0].ref) }],
+      }),
+      Zotero.MenuManager?.registerMenu({
+        menuID: "wyr-ask-many", pluginID: id, target: "main/library/item",
+        menus: [{ menuType: "menuitem", l10nID: "wyr-menu-ask-many", icon: rootURI + "content/icon.svg",
+          onShowing: (event, ctx) => ctx.setVisible((ctx.items || []).filter(i => i.isRegularItem()).length >= 2),
+          onCommand: (event, ctx) => this.openAskMany({ items: ctx.items }) }],
+      }),
+      Zotero.MenuManager?.registerMenu({
+        menuID: "wyr-ask-collection", pluginID: id, target: "main/library/collection",
+        menus: [{ menuType: "menuitem", l10nID: "wyr-menu-ask-collection", icon: rootURI + "content/icon.svg",
+          onShowing: (event, ctx) => ctx.setVisible(ctx.collectionTreeRows?.length === 1
+            && ctx.collectionTreeRows[0].isCollection()),
+          onCommand: (event, ctx) => this.openAskMany({ collection: ctx.collectionTreeRows[0].ref }) }],
+      }),
+      Zotero.MenuManager?.registerMenu({
         menuID: "wyr-similar", pluginID: id, target: "main/library/item",
         menus: [{ menuType: "menuitem", l10nID: "wyr-menu-similar", icon: rootURI + "content/icon.svg",
           onShowing: (event, ctx) => ctx.setVisible(ctx.items?.length === 1 && ctx.items[0].isRegularItem()),
@@ -327,8 +362,17 @@ Zotero.WorthYourRead = {
     // Clear temporary highlights when the PDF they're on is closed, and any
     // left over from the last session.
     this.notifierID = Zotero.Notifier.registerObserver({
-      notify: (event) => { if (event === "close") this.clearTemporaryHighlights({ closedOnly: true }); },
-    }, ["tab"], "worth-your-read");
+      notify: (event, type, ids) => {
+        if (type === "tab" && event === "close") {
+          this.clearTemporaryHighlights({ closedOnly: true });
+          for (const [noteID, d] of this.drafts) if (ids.includes(d.tabID)) this.drafts.delete(noteID);
+        }
+        // Manuscript mode: re-read the citations of an open draft after each edit.
+        if (type === "item" && event === "modify") {
+          for (const id of ids) if (this.drafts.has(id)) this.scheduleResync(this.drafts.get(id));
+        }
+      },
+    }, ["tab", "item"], "worth-your-read");
     Zotero.uiReadyPromise.then(() => this.clearTemporaryHighlights());
     for (const win of Zotero.getMainWindows()) this.addToWindow(win);
 
@@ -812,6 +856,182 @@ Zotero.WorthYourRead = {
 
   // --- Read: verify a PDF selection -------------------------------------------
 
+  // --- Ask across papers: one question, several papers, one grounded answer ---
+
+  openAskMany({ items = [], collection = null }) {
+    const papers = (collection ? collection.getChildItems() : items).filter(i => i.isRegularItem());
+    if (papers.length < 2) {
+      Zotero.alert(null, "Worth Your Read", "Asking across papers needs at least two papers.");
+      return null;
+    }
+    const title = collection ? collection.name : `${papers.length} papers`;
+    const win = Zotero.getMainWindow();
+    const { id: tabID, container } = win.Zotero_Tabs.add({
+      type: "wyr-ask-many", title: `WYR: Ask ${title}`.slice(0, 60), select: true, data: {} });
+    const st = { tabID, container, items: papers, collection, title, question: "",
+      running: false, result: null, error: null, note: null };
+    this.askManys.push(st);
+    this.renderAskMany(st);
+    return st;
+  },
+
+  async runAskMany(st) {
+    if (!st.question.trim()) return;
+    Object.assign(st, { running: true, result: null, error: null, note: null, progress: null });
+    this.renderAskMany(st);
+    try {
+      const specs = [];
+      for (const item of st.items) {
+        const { paper } = await paperFor(item);
+        specs.push({ ...paper, label: shortLabel(item), item_key: item.key });
+      }
+      st.result = await Client.run("ask_many", { question: st.question, papers: specs },
+        (p) => { st.progress = p; this.renderAskMany(st); });
+    }
+    catch (e) { st.error = e.message; }
+    st.running = false;
+    this.renderAskMany(st);
+    return st;
+  },
+
+  renderAskMany(st) {
+    const doc = st.container.ownerDocument;
+    const q = h(doc, "textarea", { rows: "2", placeholder: "Your question for these papers…",
+      style: "width:100%;box-sizing:border-box;font-size:13px" });
+    q.value = st.question;
+    q.addEventListener("input", () => { st.question = q.value; });
+    const root = h(doc, "div", { dataset: { wyrAskMany: "" },
+      style: "overflow:auto;height:100%;padding:16px 24px;box-sizing:border-box;font-size:13px;"
+        + "background:var(--material-background);color:var(--fill-primary)" },
+      h(doc, "h2", { style: "margin:0 0 8px" }, `Worth Your Read — ask ${st.title}`),
+      h(doc, "div", { style: "color:var(--fill-secondary);margin-bottom:6px" },
+        `Asks each of the ${st.items.length} papers on its own, then merges what they say into one answer; `
+        + "every passage is checked against the paper it's attributed to. Runs on your local model "
+        + "(about 20 s per paper) — paper text stays on this machine."),
+      q,
+      h(doc, "div", { style: "display:flex;gap:8px;align-items:center;margin:6px 0 10px" },
+        h(doc, "button", { dataset: { action: "ask-many" }, onclick: () => this.runAskMany(st),
+          ...(st.running ? { disabled: "true" } : {}) }, st.result ? "Ask again" : "Ask"),
+        st.running ? h(doc, "span", { dataset: { wyrProgress: "" } },
+          st.progress?.stage === "paper" ? `Reading paper ${st.progress.paper} of ${st.progress.papers}: ${st.progress.label}…`
+            : st.progress?.stage === "merge" ? `Merging ${st.progress.claims} findings from ${st.progress.papers} papers…`
+              : "Starting…") : null),
+      st.error ? h(doc, "div", { style: "color:#b3261e" }, st.error) : null);
+    if (st.result) root.append(this.renderAskManyResult(doc, st));
+    st.container.replaceChildren(root);
+  },
+
+  renderAskManyResult(doc, st) {
+    const r = st.result;
+    const itemByKey = new Map(st.items.map(i => [i.key, i]));
+    const paperN = new Map(r.papers.map(p => [p.n, p]));
+    const sourceLine = (s) => {
+      const p = paperN.get(s.paper);
+      const item = p && itemByKey.get(p.key);
+      const link = h(doc, "a", { href: "#", style: "font-weight:600",
+        onclick: async (e) => {
+          e.preventDefault();
+          if (item) await openAtPage(await item.getBestAttachment(), s.page);
+        } }, `[${s.paper}] ${p ? p.label : "?"}${s.page ? `, p. ${s.page}` : ""}`);
+      return h(doc, "blockquote", { style: "margin:4px 0 4px 12px;color:var(--fill-secondary)" },
+        link, s.reattributed ? " (the model cited a different paper; moved to the one that has it)" : "",
+        h(doc, "div", {}, `“${s.quote}”`));
+    };
+    const grounded = r.claims.filter(c => c.status === "GROUNDED");
+    const main = grounded.filter(c => !c.extra), extra = grounded.filter(c => c.extra);
+    const ungrounded = r.claims.filter(c => c.status !== "GROUNDED");
+    const unused = r.papers.filter(p => !p.used);
+    const claimList = (list) => h(doc, "ol", { style: "padding-left:20px" }, list.map(c =>
+      h(doc, "li", { style: "margin-bottom:8px" }, c.claim, c.sources.filter(s => s.verified).map(sourceLine))));
+    if (!r.claims.length) {
+      return h(doc, "div", { style: "color:#b3261e" },
+        r.truncated
+          ? "The model's answer was cut off before a single complete claim came through. "
+            + "Try fewer papers or a narrower question."
+          : "No usable answer came back from the model. Try rephrasing the question, or fewer papers.");
+    }
+    return h(doc, "div", {},
+      r.truncated ? h(doc, "div", { style: "color:#9a6700;margin-bottom:6px" },
+        `The model's answer was cut off; showing the ${r.claims.length} claim(s) that came through complete.`)
+        : null,
+      h(doc, "div", { style: "margin-bottom:8px" },
+        badge(doc, `${r.band} · ${Number(r.confidence).toFixed(2)}`, "#555"), " ",
+        `${r.grounded} grounded claim(s), ${r.ungrounded} not verified · `
+        + `${r.papers.filter(p => p.used).length} of ${r.papers.length} papers cited`),
+      claimList(main),
+      extra.length ? h(doc, "h3", { style: "margin:10px 0 4px" }, "Further findings from individual papers") : null,
+      extra.length ? claimList(extra) : null,
+      ungrounded.length ? h(doc, "div", {},
+        h(doc, "b", {}, "Not verified against any paper (no passage matched):"),
+        h(doc, "ul", {}, ungrounded.map(c => h(doc, "li", { style: "color:var(--fill-secondary)" }, c.claim))))
+        : null,
+      r.not_addressed?.length ? h(doc, "div", { style: "margin-top:6px" },
+        h(doc, "b", {}, "Not addressed by these papers: "), r.not_addressed.join("; ")) : null,
+      unused.length ? h(doc, "div", { style: "margin-top:6px;color:var(--fill-secondary)" },
+        "Not cited in the answer: " + unused.map(p => `[${p.n}] ${p.label}`).join("; ")) : null,
+      r.skipped?.length ? h(doc, "div", { style: "margin-top:6px;color:var(--fill-secondary)" },
+        "Left out (no readable text, or beyond the 12 most relevant): " + r.skipped.join("; ")) : null,
+      grounded.length ? h(doc, "div", { style: "margin-top:12px" },
+        st.note
+          ? h(doc, "button", { dataset: { action: "ask-many-open-note" },
+            onclick: () => Zotero.getActiveZoteroPane().selectItem(st.note.id) }, "Saved — show the note")
+          : h(doc, "button", { dataset: { action: "ask-many-save" },
+            onclick: () => this.saveAskManyNote(st) }, "Save as note with citations")) : null);
+  },
+
+  /** Save the answer as a standalone note whose citations are live Zotero
+   * citations (with page locators), so it can go into Word via Zotero's
+   * "Add Note" and keep them. */
+  async saveAskManyNote(st) {
+    const r = st.result;
+    const esc = Zotero.Utilities.htmlSpecialChars;
+    const itemByKey = new Map(st.items.map(i => [i.key, i]));
+    const paperN = new Map(r.papers.map(p => [p.n, p]));
+    const stored = new Map();
+    const cite = (n, page) => {
+      const item = itemByKey.get(paperN.get(n)?.key);
+      if (!item) return "";
+      const citationItem = { uris: [Zotero.URI.getItemURI(item)],
+        itemData: Zotero.Utilities.Item.itemToCSLJSON(item) };
+      stored.set(citationItem.uris[0], citationItem);
+      const citation = { citationItems: [page ? { ...citationItem, locator: String(page), label: "page" }
+        : citationItem], properties: {} };
+      return `<span class="citation" data-citation="${encodeURIComponent(JSON.stringify(citation))}">`
+        + `${Zotero.EditorInstanceUtilities.formatCitation(citation)}</span>`;
+    };
+    const parts = [`<h1>${esc(st.question)}</h1>`,
+      `<p><em>Worth Your Read · ${esc(r.band)} confidence (${Number(r.confidence).toFixed(2)}) · `
+        + `answered from ${r.papers.length} papers; every quote below was found in the paper it cites.</em></p>`];
+    const groundedClaims = r.claims.filter(c => c.status === "GROUNDED");
+    const ordered = [...groundedClaims.filter(c => !c.extra), ...groundedClaims.filter(c => c.extra)];
+    for (const c of ordered) {
+      if (c.extra && c === ordered.find(x => x.extra)) parts.push("<h2>Further findings from individual papers</h2>");
+      const ok = c.sources.filter(s => s.verified);
+      const papers = [...new Set(ok.map(s => s.paper))];
+      parts.push(`<p>${esc(c.claim)} ${papers.map(n => cite(n)).join(" ")}</p>`);
+      for (const s of ok) parts.push(`<blockquote><p>“${esc(s.quote)}” ${cite(s.paper, s.page)}</p></blockquote>`);
+    }
+    const ungrounded = r.claims.filter(c => c.status !== "GROUNDED");
+    if (ungrounded.length) {
+      parts.push("<h2>Not verified against the papers</h2><ul>"
+        + ungrounded.map(c => `<li><p>${esc(c.claim)}</p></li>`).join("") + "</ul>");
+    }
+    if (r.not_addressed?.length) {
+      parts.push(`<p><strong>Not addressed by these papers:</strong> ${esc(r.not_addressed.join("; "))}</p>`);
+    }
+    const html = `<div data-schema-version="9" data-citation-items="`
+      + `${encodeURIComponent(JSON.stringify([...stored.values()]))}">${parts.join("\n")}</div>`;
+    const note = new Zotero.Item("note");
+    note.libraryID = st.items[0].libraryID;
+    note.setNote(html);
+    const collection = st.collection || Zotero.getActiveZoteroPane().getSelectedCollection();
+    if (collection) note.addToCollection(collection.id);
+    await note.saveTx();
+    st.note = note;
+    this.renderAskMany(st);
+    return note;
+  },
+
   onSelectionPopup({ reader, doc, params, append }) {
     const text = params?.annotation?.text;
     if (!text) return;
@@ -863,55 +1083,145 @@ Zotero.WorthYourRead = {
     return pairs;
   },
 
+  /** Manuscript mode: the note in Zotero's own editor, beside a panel that
+   * checks each cited sentence against the paper it cites. Edits are tracked:
+   * sentences you change are marked and re-checked when you ask, never
+   * silently while you type. */
   async openDraftCheck(note) {
+    const open = this.drafts.get(note.id);
+    if (open) {
+      Zotero.getMainWindow().Zotero_Tabs.select(open.tabID);
+      return open;
+    }
     const win = Zotero.getMainWindow();
+    const doc = win.document;
     const { id: tabID, container } = win.Zotero_Tabs.add({
-      type: "wyr-draft", title: `Check: ${note.getNoteTitle() || "draft"}`, select: true, data: {},
+      type: "wyr-draft", title: `Manuscript: ${note.getNoteTitle() || "draft"}`, select: true, data: {},
     });
-    const draft = { note, tabID, container, rows: [], status: "Reading citations…" };
+    const box = doc.createXULElement("hbox");
+    box.setAttribute("flex", "1");
+    box.style.cssText = "display:flex;height:100%;min-height:0";
+    const editor = doc.createXULElement("note-editor");
+    editor.style.cssText = "flex:1;min-width:0";
+    const panel = h(doc, "div", { style: "width:460px;flex:none;overflow:auto;height:100%;padding:14px 18px;"
+      + "box-sizing:border-box;font-size:13px;border-left:1px solid var(--fill-quinary);"
+      + "background:var(--material-background);color:var(--fill-primary)" });
+    box.append(editor, panel);
+    container.replaceChildren(box);
+    editor.mode = note.isEditable() ? "edit" : "view";
+    editor.viewMode = "tab";
+    editor.item = note;
+    const draft = { note, tabID, container, panel, editor, rows: [], byKey: new Map(),
+      checking: false, status: "Reading citations…" };
     this.drafts.set(note.id, draft);
     this.renderDraft(draft);
-    const pairs = await this.extractCitations(note);
-    draft.rows = pairs.flatMap(p => p.cited.map(c => ({ ...p, cited: c, state: "queued" })));
-    draft.status = draft.rows.length
-      ? `Checking ${draft.rows.length} cited claim(s) against their sources…`
-      : "No Zotero citations found in this note.";
-    this.renderDraft(draft);
-    for (const row of draft.rows) {
-      row.state = "running";
-      this.renderDraft(draft);
-      try {
-        const paper = row.cited.item ? (await paperFor(row.cited.item)).paper
-          : { reference: row.cited.doi || "", title: row.cited.title };
-        row.paper = paper;
-        row.result = await Client.run("verify", { paper, claim: row.sentence });
-        row.state = "done";
-      }
-      catch (e) {
-        row.state = "error";
-        row.error = e.message;
-      }
-      this.renderDraft(draft);
-    }
-    this.updateDraftStatus(draft);
-    this.renderDraft(draft);
+    await this.resyncDraft(draft);
+    for (const row of draft.rows) row.state = "queued";
+    await this.checkRows(draft, draft.rows);
     return draft;
   },
 
+  /** Start a manuscript: a new note (in the given or currently selected
+   * collection) opened straight in manuscript mode. */
+  async newManuscript(collection = null) {
+    const pane = Zotero.getActiveZoteroPane();
+    collection ||= pane.getSelectedCollection();
+    const note = new Zotero.Item("note");
+    note.libraryID = collection?.libraryID ?? pane.getSelectedLibraryID() ?? Zotero.Libraries.userLibraryID;
+    note.setNote(`<div data-schema-version="9"><h1>Untitled manuscript</h1><p></p></div>`);
+    if (collection) note.addToCollection(collection.id);
+    await note.saveTx();
+    const draft = await this.openDraftCheck(note);
+    draft.editor.focus();
+    return draft;
+  },
+
+  rowKey(sentence, cited) {
+    const text = sentence.replace(/\s+/g, " ").replace(/[\s.;:,]+$/, "").trim().toLowerCase();
+    return `${text}|${cited.item?.key || cited.doi || cited.title}`;
+  },
+
+  scheduleResync(draft) {
+    Zotero.getMainWindow().clearTimeout(draft.resyncTimer);
+    draft.resyncTimer = Zotero.getMainWindow().setTimeout(() => this.resyncDraft(draft), 800);
+  },
+
+  /** Re-read the note's citations. A (sentence, cited paper) pair seen before
+   * keeps its row — verdict, rewording, suggestions; anything new is a fresh
+   * row marked as edited and not yet checked. */
+  async resyncDraft(draft) {
+    const pairs = await this.extractCitations(draft.note);
+    const first = !draft.synced;          // rows found on opening get checked; later ones wait
+    draft.synced = true;
+    const rows = [];
+    for (const p of pairs) {
+      for (const cited of p.cited) {
+        const key = this.rowKey(p.sentence, cited);
+        let row = draft.byKey.get(key);
+        if (!row) {
+          row = { sentence: p.sentence, cited, state: first ? "queued" : "edited" };
+          draft.byKey.set(key, row);
+        }
+        row.index = p.index;
+        if (!rows.includes(row)) rows.push(row);
+      }
+    }
+    draft.rows = rows;
+    this.updateDraftStatus(draft);
+    this.renderDraft(draft);
+  },
+
+  async checkRow(draft, row) {
+    row.state = "running";
+    row.error = null;
+    this.renderDraft(draft);
+    try {
+      row.paper ||= row.cited.item ? (await paperFor(row.cited.item)).paper
+        : { reference: row.cited.doi || "", title: row.cited.title };
+      row.result = await Client.run("verify", { paper: row.paper, claim: row.sentence });
+      row.state = "done";
+    }
+    catch (e) {
+      row.state = "error";
+      row.error = e.message;
+    }
+    this.updateDraftStatus(draft);
+    this.renderDraft(draft);
+  },
+
+  async checkRows(draft, rows) {
+    draft.checking = true;
+    for (const row of rows) {
+      if (draft.rows.includes(row)) await this.checkRow(draft, row);
+    }
+    draft.checking = false;
+    this.updateDraftStatus(draft);
+    this.renderDraft(draft);
+  },
+
   updateDraftStatus(draft) {
-    const ok = draft.rows.filter(r => r.result?.verdict === "SUPPORTED").length;
-    draft.status = `${ok} of ${draft.rows.length} cited claim(s) supported by their source.`;
+    const rows = draft.rows;
+    if (!rows.length) {
+      draft.status = "No Zotero citations in this note yet — cite papers with the note editor's citation button.";
+      return;
+    }
+    const ok = rows.filter(r => r.state === "done" && r.result?.verdict === "SUPPORTED").length;
+    const edited = rows.filter(r => r.state === "edited").length;
+    draft.status = `${ok} of ${rows.length} cited claim(s) supported by their source`
+      + (edited ? ` · ${edited} edited, not checked yet` : "") + ".";
   },
 
   renderDraft(draft) {
-    const { container } = draft;
-    const doc = container.ownerDocument;
-    container.replaceChildren(h(doc, "div",
-      { dataset: { wyrDraft: draft.note.id },
-        style: "overflow:auto;height:100%;padding:16px 24px;box-sizing:border-box;font-size:13px;"
-          + "background:var(--material-background);color:var(--fill-primary)" },
-      h(doc, "h2", { style: "margin:0 0 4px" }, "Worth Your Read — citation check"),
-      h(doc, "div", { style: "color:var(--fill-secondary);margin-bottom:12px" }, draft.status),
+    const { panel } = draft;
+    const doc = panel.ownerDocument;
+    const edited = draft.rows.filter(r => r.state === "edited" || r.state === "error");
+    panel.replaceChildren(h(doc, "div", { dataset: { wyrDraft: draft.note.id } },
+      h(doc, "h3", { style: "margin:0 0 4px" }, "Citation check"),
+      h(doc, "div", { style: "color:var(--fill-secondary);margin-bottom:8px" }, draft.status),
+      edited.length && !draft.checking
+        ? h(doc, "button", { dataset: { action: "check-edited" }, style: "margin-bottom:10px",
+          onclick: () => this.checkRows(draft, edited) }, `Check ${edited.length} edited claim(s)`)
+        : null,
       ...draft.rows.map((row, i) => this.renderDraftRow(doc, draft, row, i))));
   },
 
@@ -924,7 +1234,8 @@ Zotero.WorthYourRead = {
       h(doc, "div", { style: "color:var(--fill-secondary);margin:2px 0 6px" }, `cites: ${row.cited.title}`));
     if (row.state !== "done") {
       card.append(h(doc, "div", { style: row.state === "error" ? "color:#b3261e" : "color:var(--fill-secondary)" },
-        row.state === "error" ? row.error : row.state === "running" ? "Checking…" : "Waiting…"));
+        row.state === "error" ? row.error : row.state === "running" ? "Checking…"
+          : row.state === "edited" ? "Edited — not checked yet." : "Waiting…"));
       return card;
     }
     card.append(h(doc, "div", {}, badge(doc, v, VERDICT_COLOR[v] || "#666"),
@@ -1028,10 +1339,12 @@ Zotero.WorthYourRead = {
       row.error = "Couldn't find that sentence in the note any more — it may have been edited.";
     }
     else {
+      row.revision.applied = true;
+      draft.byKey.delete(this.rowKey(row.sentence, row.cited));
+      row.sentence = row.revision.text.replace(/[.\s]+$/, "");
+      draft.byKey.set(this.rowKey(row.sentence, row.cited), row);
       note.setNote(doc.body.innerHTML);
       await note.saveTx();
-      row.revision.applied = true;
-      row.sentence = row.revision.text.replace(/[.\s]+$/, "");
       // Re-check the new wording against the same source.
       row.busy = "Re-checking the new wording…";
       this.renderDraft(draft);
@@ -1080,10 +1393,7 @@ Zotero.WorthYourRead = {
       }
       note.setNote(doc.body.innerHTML);
       await note.saveTx();
-      s.added = true;
-      // The new citation sits right after this one, so later rows' citations
-      // each move one position along.
-      for (const r of draft.rows) if (r.index > row.index) r.index++;
+      s.added = true;   // the edit resync picks up the new citation as an edited row
     }
     catch (e) { row.error = `Couldn't add it: ${e.message}`; }
     row.busy = null;

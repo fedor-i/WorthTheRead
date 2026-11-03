@@ -47,6 +47,135 @@ Zotero.WorthYourReadSelfTest = {
       log("sectionRendered", !!body(paper.id)?.isConnected);
 
       const only = Zotero.Prefs.get("extensions.wyr.selftestOnly", true) || "";
+      if (only === "live2") {
+        // Approved live run: one cross-paper question, one manuscript re-check.
+        const win = Zotero.getMainWindow();
+        const keys = ["CEUPQHKJ", "YU69WJ6N", "J93PJPZL", "EAUCCQ6M"];
+        const papers = keys.map(k => Zotero.Items.getByLibraryAndKey(lib, k)).filter(Boolean);
+        const question = "How likely is a published research finding to be false, and what affects that probability?";
+        // Earlier empty answers saved as notes go to the trash.
+        const stale = all.filter(i => i.isNote() && !i.deleted && i.getNoteTitle() === question);
+        for (const n of stale) { n.deleted = true; await n.saveTx(); }
+        log("trashedStaleNotes", stale.length);
+        const st = WYR.openAskMany({ items: papers });
+        st.question = question;
+        let t = Date.now();
+        await WYR.runAskMany(st);
+        const r = st.result;
+        log("askMany", { s: (Date.now() - t) / 1000, error: st.error, band: r?.band, confidence: r?.confidence,
+          grounded: r?.grounded, ungrounded: r?.ungrounded, skipped: r?.skipped, not_addressed: r?.not_addressed,
+          papers: r?.papers, claims: (r?.claims || []).map(c => [c.status, c.claim,
+            c.sources.map(x => [x.paper, x.verified, x.reattributed, x.page, x.quote.slice(0, 90)])]) });
+        if (r) {
+          const note = await WYR.saveAskManyNote(st);
+          const html = note.getNote();
+          const d = new win.DOMParser().parseFromString(html, "text/html");
+          log("askManyNote", { citations: d.querySelectorAll("span.citation").length,
+            citeTexts: [...d.querySelectorAll("span.citation")].slice(0, 6).map(x => x.textContent),
+            storedItems: JSON.parse(decodeURIComponent(d.querySelector("[data-citation-items]")
+              ?.dataset.citationItems || "%5B%5D")).length,
+            text: d.body.textContent.slice(0, 700) });
+        }
+        log("askManyTabText", st.container.textContent.slice(0, 1500));
+        win.Zotero_Tabs.close(st.tabID);
+        if (Zotero.Prefs.get("extensions.wyr.selftestAskOnly", true)) {
+          R.seconds = (Date.now() - t0) / 1000;
+          await save();
+          return;
+        }
+
+        const ms = await WYR.newManuscript(null);
+        const cite = encodeURIComponent(JSON.stringify({
+          citationItems: [{ uris: [Zotero.URI.getItemURI(paper)] }], properties: {} }));
+        ms.note.setNote(`<div data-schema-version="9"><h1>Manuscript live test</h1><p>Most published research `
+          + `findings are false, regardless of study design or field `
+          + `<span class="citation" data-citation="${cite}">(Ioannidis 2005)</span>.</p></div>`);
+        await ms.note.saveTx();
+        await until(() => ms.rows.length > 0 && ms.panel.querySelector('[data-action="check-edited"]'), 10000);
+        t = Date.now();
+        ms.panel.querySelector('[data-action="check-edited"]').click();
+        await until(() => ms.rows.every(r => ["done", "error"].includes(r.state)), 300000);
+        log("manuscriptRecheck", { s: (Date.now() - t) / 1000, status: ms.status,
+          rows: ms.rows.map(r => [r.sentence, r.state, r.result?.verdict, r.result?.confidence, r.error || null]),
+          panel: ms.panel.textContent.slice(0, 500) });
+        win.Zotero_Tabs.close(ms.tabID);
+        ms.note.deleted = true;
+        await ms.note.saveTx();
+        R.seconds = (Date.now() - t0) / 1000;
+        await save();
+        return;
+      }
+      if (only === "ui") {
+        // New UI without running any model job: menus, the ask-across tab,
+        // and manuscript mode tracking an edit.
+        const win = Zotero.getMainWindow();
+        const papers = all.filter(i => i.isRegularItem()).slice(0, 3);
+        await pane.selectItems(papers.map(i => i.id));
+        const popup = win.document.getElementById("zotero-itemmenu");
+        await pane.buildItemContextMenu();
+        const shown = new Promise(r => popup.addEventListener("popupshown", r, { once: true }));
+        popup.openPopup(win.document.getElementById("zotero-items-tree"), "overlap", 50, 50);
+        await Promise.race([shown, delay(5000)]);
+        await delay(500);
+        const askEntry = popup.querySelector('menuitem[data-l10n-id="wyr-menu-ask-many"]');
+        log("askManyMenu", { selected: papers.length, found: !!askEntry, hidden: askEntry?.hidden });
+        popup.hidePopup();
+        const coll = Zotero.Collections.getByLibrary(lib)[0];
+        if (coll) {
+          await pane.collectionsView.selectByID("C" + coll.id);
+          const cpop = win.document.getElementById("zotero-collectionmenu");
+          await pane.buildCollectionContextMenu();
+          const cshown = new Promise(r => cpop.addEventListener("popupshown", r, { once: true }));
+          cpop.openPopup(win.document.getElementById("zotero-collections-tree"), "overlap", 20, 20);
+          await Promise.race([cshown, delay(5000)]);
+          await delay(500);
+          const ce = cpop.querySelector('menuitem[data-l10n-id="wyr-menu-ask-collection"]');
+          log("askCollectionMenu", { collection: coll.name, found: !!ce, hidden: ce?.hidden });
+          cpop.hidePopup();
+        }
+        const st = WYR.openAskMany({ items: papers });
+        log("askManyTab", { items: st?.items.length, text: st?.container.textContent.slice(0, 300),
+          hasAskButton: !!st?.container.querySelector('[data-action="ask-many"]') });
+        win.Zotero_Tabs.close(st.tabID);
+
+        // Tools → New manuscript: a fresh note opened in manuscript mode.
+        const ms = await WYR.newManuscript(coll || null);
+        log("newManuscript", { noteTitle: ms.note.getNoteTitle(), inCollection: coll ? ms.note.inCollection(coll.id) : null,
+          editor: ms.editor?.localName, editorItem: ms.editor?.item?.id === ms.note.id, rows: ms.rows.length,
+          tabSelected: win.Zotero_Tabs.selectedID === ms.tabID,
+          toolsMenu: [...win.document.querySelectorAll('menuitem[data-l10n-id="wyr-menu-new-manuscript"]')].length });
+        win.Zotero_Tabs.close(ms.tabID);
+        ms.note.deleted = true;
+        await ms.note.saveTx();
+
+        // Manuscript mode on a note with no citations: opening runs no check.
+        const note = new Zotero.Item("note");
+        note.libraryID = lib;
+        note.setNote(`<div data-schema-version="9"><h1>Manuscript UI test</h1><p>No citations yet.</p></div>`);
+        await note.saveTx();
+        const draft = await WYR.openDraftCheck(note);
+        await delay(3000);
+        log("manuscriptOpen", { status: draft.status, rows: draft.rows.length,
+          editor: draft.editor?.localName, editorItem: draft.editor?.item?.id === note.id,
+          panelText: draft.panel.textContent.slice(0, 200) });
+        // An edit adds a cited sentence: it should appear as edited, unchecked.
+        const cite = encodeURIComponent(JSON.stringify({
+          citationItems: [{ uris: [Zotero.URI.getItemURI(paper)] }], properties: {} }));
+        note.setNote(`<div data-schema-version="9"><h1>Manuscript UI test</h1><p>Most published research `
+          + `findings are false <span class="citation" data-citation="${cite}">(Ioannidis 2005)</span>.</p></div>`);
+        await note.saveTx();
+        await until(() => draft.rows.length > 0, 10000);
+        log("manuscriptEdit", { status: draft.status, rows: draft.rows.map(r => [r.sentence, r.state]),
+          checkButton: !!draft.panel.querySelector('[data-action="check-edited"]') });
+        win.Zotero_Tabs.close(draft.tabID);
+        await delay(500);
+        log("manuscriptClosed", { stillTracked: WYR.drafts.has(note.id) });
+        note.deleted = true;            // to the Zotero trash, not erased
+        await note.saveTx();
+        R.seconds = (Date.now() - t0) / 1000;
+        await save();
+        return;
+      }
       if (only === "research") {
         // Clear earlier runs: their collection goes, and the items they imported
         // (anything in it except the test paper) go to the Zotero trash.
