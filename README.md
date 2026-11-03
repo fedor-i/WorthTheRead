@@ -163,7 +163,7 @@ is only needed for other clients or custom environment variables.
 Every call needs the header `X-WYR-Token` (the token is created on first run in
 `$WYR_DATA_DIR/sidecar.token`, readable only by you). Model work runs as jobs,
 one at a time: `POST /jobs {"kind": ..., "args": ...}` returns a `job_id`; poll
-`GET /jobs/{job_id}`. Kinds: `verify`, `ask`, `ask_many` (one question across several papers), `summarize`, `revise`, `suggest`,
+`GET /jobs/{job_id}`. Kinds: `verify`, `ask`, `ask_many` (one question across several papers; optional `max_papers`, default all), `summarize`, `revise`, `suggest`,
 `find`, `plan`, `locate` (on-page rectangles of quotes, for highlights),
 `research` (snowball the citation graph from a question until it runs dry; reports `progress`).
 Research uses OpenAlex heavily; without a key OpenAlex allows a small daily

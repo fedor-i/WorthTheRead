@@ -121,7 +121,8 @@ def ask(question: str, fetched: dict, check: bool = False) -> dict:
 # it's attributed to. A local model given all the papers in one prompt tends to
 # answer from the first obvious one; asked one at a time, every paper speaks.
 
-MAX_PAPERS = 12        # each paper is one model call; beyond this it gets slow
+MAX_PAPERS = 12        # the plugin's default when the user doesn't choose
+MERGE_BATCH = 24       # findings per merge call; past this a local model starts dropping papers
 
 _MERGE_SYSTEM = """You merge findings from SEVERAL papers into one answer to a \
 QUESTION. You get numbered CLAIMS, each already checked against the paper in \
@@ -147,24 +148,123 @@ def _rank_papers(question: str, papers: list) -> list:
     return sorted(range(len(papers)), key=lambda i: -scores[i])
 
 
-def ask_many(question: str, papers: list, progress=None) -> dict:
+# A per-paper "finding" that is about the paper, not the question ("The study
+# does not state where nitrogen limits growth"): a gap, not a claim.
+_META_CLAIM = re.compile(
+    r"\b(?:the|this) (?:study|paper|article|text|excerpt|authors?|review|abstract)\b[^.]*?"
+    r"\b(?:does|do|did)(?: not|n't)(?: explicitly| directly| clearly)?"
+    r" (?:state|mention|specify|say|address|discuss|provide|report|describe|identify)\b", re.I)
+
+
+def _merge(question: str, chosen: list, found: list, items: list) -> tuple:
+    """One merge call. `items` are (text, {finding ids}); returns the merged
+    (text, {finding ids}) — each resting on the findings of the items it
+    names — and the model's parsed reply."""
+    listing = "\n".join(
+        f"C{i} [{', '.join(f'P{n}' for n in sorted({found[j][0] for j in ids}))}] {text}"
+        for i, (text, ids) in enumerate(items, 1))
+    papers = sorted({found[j][0] for _, ids in items for j in ids})
+    titles = "\n".join(f"[P{n}] {chosen[n - 1].get('label', '')}" for n in papers)
+    try:
+        data = _parse(_complete(_MERGE_SYSTEM, f"QUESTION:\n{question}\n\nPAPERS:\n{titles}"
+                                f"\n\nCLAIMS:\n{listing}", max_tokens=2000))
+    except Exception:
+        data = {}
+    merged = []
+    for c in data.get("claims") or []:
+        if not isinstance(c, dict) or not (c.get("claim") or "").strip():
+            continue
+        ids = set()
+        for ref in c.get("from") or []:
+            m = re.search(r"\d+", str(ref))
+            if m and 1 <= int(m.group(0)) <= len(items):
+                ids |= items[int(m.group(0)) - 1][1]
+        # The model echoes "[P1, P3]"; the citations come from the ids.
+        merged.append((re.sub(r"\s*\[(?:P\d+[,;\s]*)+\]", "", c["claim"]).strip(), ids))
+    return merged, data
+
+
+_SUPPORT_SYSTEM = """You check which FINDINGS back a SENTENCE. A finding backs \
+it only if, on its own, it says what the sentence says about the same thing: \
+the same place or region, population, nutrient and outcome. A finding on the \
+same topic but about a different region, organism or result does NOT back it. \
+Return ONLY a JSON object: {"support": ["C1", "C3"]} — an empty list if none do."""
+
+
+def _supporting(sentence: str, found: list, ids: set) -> set:
+    """The ids, among `ids`, whose findings back `sentence` on their own. The
+    merge groups findings by topic, so a sentence about one region can pick up
+    findings about another; one short call per sentence prunes them. If the
+    check fails to answer, the merge's ids stand."""
+    ordered = sorted(ids)
+    listing = "\n".join(f"C{k} {found[i][1]}" for k, i in enumerate(ordered, 1))
+    try:
+        data = _parse(_complete(_SUPPORT_SYSTEM, f"SENTENCE:\n{sentence}\n\nFINDINGS:\n{listing}",
+                                max_tokens=200))
+    except Exception:
+        return ids
+    if not isinstance(data.get("support"), list):
+        return ids
+    keep = set()
+    for ref in data["support"]:
+        m = re.search(r"\d+", str(ref))
+        if m and 1 <= int(m.group(0)) <= len(ordered):
+            keep.add(ordered[int(m.group(0)) - 1])
+    return keep
+
+
+def _batches(items: list, found: list, size: int) -> list:
+    """Consecutive groups of at most `size` items, never splitting one paper's
+    findings when a group can take them whole."""
+    runs = []                      # consecutive items from the same paper
+    for item in items:
+        n = min((found[j][0] for j in item[1]), default=0)
+        if runs and runs[-1][0] == n:
+            runs[-1][1].append(item)
+        else:
+            runs.append((n, [item]))
+    groups, cur = [], []
+    for _, run in runs:
+        if cur and len(cur) + len(run) > size:
+            groups.append(cur)
+            cur = []
+        for item in run:
+            if len(cur) >= size:
+                groups.append(cur)
+                cur = []
+            cur.append(item)
+    return groups + ([cur] if cur else [])
+
+
+def ask_many(question: str, papers: list, progress=None, max_papers: int = None) -> dict:
     """Answer `question` from several papers at once.
 
     `papers` is a list of {"label", "fetched", "pages"?, "key"?}. Returns
     {question, claims: [{claim, status, sources: [{paper, quote, verified,
     page}]}], papers: [{n, label, key, cited, abstract_only, used, error?}],
-    skipped, not_addressed, merged, confidence, band, grounded, ungrounded}."""
+    skipped, left_out: [{label, key, reason}], not_addressed, merged,
+    confidence, band, grounded, ungrounded}. Papers beyond `max_papers` (the
+    least relevant to the question) are left out, reason "limit"; None reads all.
+    However many findings come back, no single merge call sees more than
+    MERGE_BATCH of them: larger sets are merged in parts, then the parts merged.
+    Each merged claim that rests on several findings is then checked against
+    them, and keeps only those that back it; a claim none back is UNGROUNDED."""
     report = lambda **kw: progress and progress(kw)
     readable = [p for p in papers if (p.get("fetched") or {}).get("full_text")]
     out = {"question": question, "claims": [], "not_addressed": [], "papers": [],
            "skipped": [p.get("label", "") for p in papers if p not in readable],
+           "left_out": [{"label": p.get("label", ""), "key": p.get("key", ""), "reason": "no_text"}
+                        for p in papers if p not in readable],
            "merged": False, "confidence": 0.0, "band": "Low", "grounded": 0, "ungrounded": 0}
     if not readable:
         out["not_addressed"] = ["None of the papers had readable text."]
         return out
     order = _rank_papers(question, readable)
-    out["skipped"] += [readable[i].get("label", "") for i in order[MAX_PAPERS:]]
-    chosen = [readable[i] for i in sorted(order[:MAX_PAPERS])]   # keep the user's order
+    max_papers = len(readable) if not max_papers else max(1, int(max_papers))
+    out["skipped"] += [readable[i].get("label", "") for i in order[max_papers:]]
+    out["left_out"] += [{"label": readable[i].get("label", ""), "key": readable[i].get("key", ""),
+                         "reason": "limit"} for i in order[max_papers:]]
+    chosen = [readable[i] for i in sorted(order[:max_papers])]   # keep the user's order
 
     # Map: each paper on its own.
     found, gaps = [], []           # found: (paper n, claim text, [verified quotes])
@@ -176,7 +276,9 @@ def ask_many(question: str, papers: list, progress=None) -> dict:
             r = ask(question, p["fetched"])
             for c in r["claims"]:
                 quotes = [q["text"] for q in c["quotes"] if q["verified"]]
-                if quotes:
+                if _META_CLAIM.search(c["claim"]):
+                    gaps.append(c["claim"])
+                elif quotes:
                     found.append((n, c["claim"], quotes))
             gaps += r["not_addressed"]
         except Exception as e:
@@ -187,30 +289,32 @@ def ask_many(question: str, papers: list, progress=None) -> dict:
         return {"paper": n, "quote": quote, "verified": True, "reattributed": False,
                 "page": _library_page(quote, chosen[n - 1].get("pages"))}
 
-    # Merge: one call over the verified per-paper claims.
+    # Merge the verified per-paper claims, in parts when there are many: each
+    # round merges groups of at most MERGE_BATCH, until one call can take the rest.
     merged, used = [], set()
     if len(found) > 1:
+        items, rnd = [(text, {i}) for i, (_, text, _) in enumerate(found)], 0
+        while len(items) > MERGE_BATCH:
+            rnd += 1
+            parts, nxt = _batches(items, found, MERGE_BATCH), []
+            for k, part in enumerate(parts, 1):
+                report(stage="merge", papers=len(chosen), claims=len(found), part=k, parts=len(parts), round=rnd)
+                res, data = _merge(question, chosen, found, part)
+                out["truncated"] = out.get("truncated") or bool(data.get("truncated"))
+                # A part that failed carries its own findings forward.
+                nxt += [r for r in res if r[1]] or part
+            if len(nxt) >= len(items):        # no progress: stop shrinking
+                break
+            items = nxt
         report(stage="merge", papers=len(chosen), claims=len(found))
-        listing = "\n".join(f"C{i} [P{n}] {text}" for i, (n, text, _) in enumerate(found, 1))
-        titles = "\n".join(f"[P{n}] {p.get('label', '')}" for n, p in enumerate(chosen, 1))
-        try:
-            data = _parse(_complete(_MERGE_SYSTEM, f"QUESTION:\n{question}\n\nPAPERS:\n{titles}"
-                                    f"\n\nCLAIMS:\n{listing}", max_tokens=2000))
-        except Exception:
-            data = {}
-        out["truncated"] = bool(data.get("truncated"))
-        for c in data.get("claims") or []:
-            if not isinstance(c, dict) or not (c.get("claim") or "").strip():
-                continue
-            ids = []
-            for ref in c.get("from") or []:
-                m = re.search(r"\d+", str(ref))
-                if m and 1 <= int(m.group(0)) <= len(found) and int(m.group(0)) - 1 not in ids:
-                    ids.append(int(m.group(0)) - 1)
-            sources = [source(found[i][0], q) for i in ids for q in found[i][2]]
-            used.update(ids)
-            # The model echoes "[P1, P3]"; the citations come from `sources`.
-            text = re.sub(r"\s*\[(?:P\d+[,;\s]*)+\]", "", c["claim"]).strip()
+        final, data = _merge(question, chosen, found, items)
+        out["truncated"] = out.get("truncated") or bool(data.get("truncated"))
+        for k, (text, ids) in enumerate(final, 1):
+            if len(ids) > 1:
+                report(stage="check", claim=k, claims=len(final))
+                ids = _supporting(text, found, ids)
+            sources = [source(found[i][0], q) for i in sorted(ids) for q in found[i][2]]
+            used |= ids
             merged.append({"claim": text, "sources": sources, "extra": False,
                            "status": "GROUNDED" if sources else "UNGROUNDED"})
         out["not_addressed"] = [x for x in data.get("not_addressed") or []

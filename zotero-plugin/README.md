@@ -31,15 +31,30 @@ with a local Ollama model; the plugin only talks to `127.0.0.1`.
 
 **Ask across papers** — select two or more papers and right-click → *Ask across
 selected papers…*, or right-click a collection → *Ask across this collection…*.
-One question, one answer drawn from all of them (the 12 most relevant if there
-are more). Each paper is asked on its own — its passages checked against its
+One question, one answer drawn from all of them. By default every paper is
+read; you can lower that in the tab to the N most relevant (or set a default
+with the pref `extensions.wyr.askManyMax`). Each paper is asked on its own — its passages checked against its
 own text — and one more step merges those findings, keeping agreement and
 disagreement between papers visible. Each answer claim names the papers it
 rests on with their verbatim passages; the merge can only point at checked
 findings, never write quotes, and any finding it leaves out is still listed.
+With many papers the findings are merged in parts of at most 24, then the
+parts merged, so no single model call has to juggle them all.
+Then each answer claim that rests on several findings is checked against them
+in one short call, and keeps only the findings that back it (same region,
+population, outcome); the others stay in the note as further findings.
 About 20 seconds per paper on gemma4:26b. **Save as note with
 citations** stores it as a note with live Zotero citations (page locators
 included), which Zotero's Word/LibreOffice plugin can insert with *Add Note*.
+Each quote with a page links straight to that page of the PDF (a paper read
+online links to its DOI or URL instead), and the note
+ends with **References**: every paper asked, its title linking to the item in
+your library, plus links to your PDF and to the paper online, grouped as *Read first* (highlighted yellow — the answer rests
+on them, most-cited first), *Not read by the assistant* (highlighted red — left
+out by the limit, no readable text, or failed to load, so the answer can't
+speak for them), *Supporting detail* and *Read, nothing on the question*. A paper
+the model saw only the abstract of is flagged red too. Findings that are about
+the paper rather than the question ("the study does not state…") are dropped.
 
 **Research** — *Tools → Research a question with Worth Your Read…*, or
 **Find similar papers** (item pane button / item right-click). It finds seed
@@ -110,6 +125,7 @@ zip -r build/worth-your-read-0.1.0.xpi manifest.json bootstrap.js prefs.js local
 | `extensions.wyr.dataDir` | `~/Library/Application Support/WorthYourRead` (macOS) | where the sidecar's token lives |
 | `extensions.wyr.temporaryHighlights` | `true` | remove highlights after each action unless kept |
 | `extensions.wyr.autoStart` | `true` | start the sidecar when needed, stop it on quit |
+| `extensions.wyr.askManyMax` | `0` | default number of papers *Ask across papers* reads (0 = all) |
 | `extensions.wyr.sidecarCommand` | *(auto-detect)* | shell command that runs the sidecar |
 | `extensions.wyr.model` | `gemma4:26b` | Ollama model the auto-started sidecar uses |
 

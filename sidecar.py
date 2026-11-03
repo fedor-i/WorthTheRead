@@ -107,7 +107,7 @@ def _verify(args: dict) -> dict:
 
 
 def _ask_many(args: dict) -> dict:
-    papers, failed = [], []
+    papers, failed, failed_keys = [], [], []
     for spec in args.get("papers", []):
         paper = Paper(**spec)
         label = spec.get("label") or paper.title or paper.reference or paper.attachment_key
@@ -115,11 +115,14 @@ def _ask_many(args: dict) -> dict:
             fetched, pages, _ = _load(paper)
         except Exception:
             failed.append(label)
+            failed_keys.append({"label": label, "key": spec.get("item_key", ""), "reason": "load_failed"})
             continue
         papers.append({"label": label, "key": spec.get("item_key", ""),
                        "fetched": fetched, "pages": pages})
-    r = _answer.ask_many(args["question"], papers, progress=args.get("_progress"))
+    r = _answer.ask_many(args["question"], papers, progress=args.get("_progress"),
+                         max_papers=int(args.get("max_papers") or 0) or None)
     r["skipped"] = failed + r["skipped"]
+    r["left_out"] = failed_keys + r["left_out"]
     return r
 
 

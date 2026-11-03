@@ -188,6 +188,15 @@ const Client = {
 
 // --- small helpers ------------------------------------------------------------
 
+/** Reject if `promise` hasn't settled within `ms`. */
+function withTimeout(promise, ms) {
+  const win = Zotero.getMainWindow();     // the plugin scope has no timers of its own
+  let timer;
+  return Promise.race([promise, new Promise((_, reject) => {
+    timer = win.setTimeout(() => reject(new Error("timed out")), ms);
+  })]).finally(() => win.clearTimeout(timer));
+}
+
 /** "Ioannidis 2005 — Why most published research…" for lists and prompts. */
 function shortLabel(item) {
   const year = Zotero.Date.strToDate(item.getField("date") || "").year;
@@ -195,6 +204,32 @@ function shortLabel(item) {
   const who = [item.firstCreator.replace(/[\u2066-\u2069]/g, ""), year].filter(Boolean).join(" ");
   const title = item.getDisplayTitle();
   return (who ? `${who} — ` : "") + (title.length > 70 ? title.slice(0, 67) + "…" : title);
+}
+
+const READ_FIRST = 5;     // papers highlighted "Read first" in an answer note's references
+
+const LEFT_OUT = { limit: "beyond the number of papers you chose", no_text: "no readable text",
+  load_failed: "couldn't be loaded" };
+
+/** "Martin 1990 — Glacial-interglacial… (no readable text)" per paper an answer didn't read. */
+function leftOutLines(r) {
+  return (r.left_out || (r.skipped || []).map(label => ({ label })))
+    .map(p => p.reason ? `${p.label} (${LEFT_OUT[p.reason] || p.reason})` : p.label);
+}
+
+/** The zotero:// path of an item's library: "library", or "groups/<id>". */
+function libraryPath(item) {
+  return item.library.libraryType === "group"
+    ? `groups/${Zotero.Groups.getGroupIDFromLibraryID(item.libraryID)}` : "library";
+}
+
+/** The paper online: its DOI, else the item's URL. */
+function onlineURL(item) {
+  const doi = (item.getField("DOI") || "").match(DOI_RE)?.[0]
+    || (item.getField("extra") || "").match(DOI_RE)?.[0];
+  if (doi) return `https://doi.org/${doi}`;
+  const url = item.getField("url");
+  return /^https?:\/\//.test(url) ? url : null;
 }
 
 function titleKey(title) {
@@ -781,7 +816,7 @@ Zotero.WorthYourRead = {
       h(doc, "button", { onclick: sel(() => true) }, "Select all"),
       h(doc, "button", { onclick: sel(() => false) }, "Clear"),
       h(doc, "button", { dataset: { action: "research-import" }, onclick: () => this.importResearch(rs),
-        ...(rs.selected.size ? {} : { disabled: "true" }) },
+        ...(rs.selected.size && !rs.importing ? {} : { disabled: "true" }) },
         `Import ${rs.selected.size} selected into a new collection`)));
     if (rs.importMsg) box.append(h(doc, "div", { style: "margin-bottom:8px;color:#1b7f3b" }, rs.importMsg));
     const groups = [
@@ -816,6 +851,18 @@ Zotero.WorthYourRead = {
    * collection named after the question; papers already in the library are
    * added to the collection, not duplicated. */
   async importResearch(rs) {
+    if (rs.importing) return rs;          // one import at a time per search
+    rs.importing = true;
+    try {
+      return await this.importResearchNow(rs);
+    }
+    finally {
+      rs.importing = false;
+      this.renderResearch(rs);
+    }
+  },
+
+  async importResearchNow(rs) {
     const r = rs.result;
     const picked = r.papers.filter(p => rs.selected.has(p.id) && p.doi);
     const lib = Zotero.Libraries.userLibraryID;
@@ -835,9 +882,10 @@ Zotero.WorthYourRead = {
           const tr = new Zotero.Translate.Search();
           tr.setIdentifier({ DOI: p.doi });
           tr.setTranslator(await tr.getTranslators());
-          [item] = await tr.translate({ libraryID: lib, collections: [col.id] });
+          [item] = await withTimeout(tr.translate({ libraryID: lib, collections: [col.id] }), 60000);
           added++;
-          if (await Zotero.Attachments.addAvailableFile(item).catch(() => null)) pdfs++;
+          // A publisher site that never answers mustn't stall the rest: skip the PDF.
+          if (await withTimeout(Zotero.Attachments.addAvailableFile(item), 90000).catch(() => null)) pdfs++;
         }
         if (!item.inCollection(col.id)) {
           item.addToCollection(col.id);
@@ -868,8 +916,10 @@ Zotero.WorthYourRead = {
     const win = Zotero.getMainWindow();
     const { id: tabID, container } = win.Zotero_Tabs.add({
       type: "wyr-ask-many", title: `WYR: Ask ${title}`.slice(0, 60), select: true, data: {} });
+    // 0 (the default) reads every paper; the user can lower it in the tab.
+    const limit = Number(Zotero.Prefs.get("extensions.wyr.askManyMax", true)) || papers.length;
     const st = { tabID, container, items: papers, collection, title, question: "",
-      running: false, result: null, error: null, note: null };
+      maxPapers: Math.min(papers.length, limit), running: false, result: null, error: null, note: null };
     this.askManys.push(st);
     this.renderAskMany(st);
     return st;
@@ -885,7 +935,7 @@ Zotero.WorthYourRead = {
         const { paper } = await paperFor(item);
         specs.push({ ...paper, label: shortLabel(item), item_key: item.key });
       }
-      st.result = await Client.run("ask_many", { question: st.question, papers: specs },
+      st.result = await Client.run("ask_many", { question: st.question, papers: specs, max_papers: st.maxPapers },
         (p) => { st.progress = p; this.renderAskMany(st); });
     }
     catch (e) { st.error = e.message; }
@@ -900,6 +950,15 @@ Zotero.WorthYourRead = {
       style: "width:100%;box-sizing:border-box;font-size:13px" });
     q.value = st.question;
     q.addEventListener("input", () => { st.question = q.value; });
+    const limit = h(doc, "input", { type: "number", min: "1", max: String(st.items.length),
+      value: String(st.maxPapers), dataset: { wyrLimit: "" }, style: "width:4em" });
+    const minutes = () => `about ${Math.max(1, Math.round(st.maxPapers * 20 / 60))} min`;
+    const estimate = h(doc, "span", { style: "color:var(--fill-secondary)" }, minutes());
+    limit.addEventListener("input", () => {
+      const n = Math.round(Number(limit.value));
+      if (n >= 1) st.maxPapers = Math.min(n, st.items.length);
+      estimate.textContent = minutes();
+    });
     const root = h(doc, "div", { dataset: { wyrAskMany: "" },
       style: "overflow:auto;height:100%;padding:16px 24px;box-sizing:border-box;font-size:13px;"
         + "background:var(--material-background);color:var(--fill-primary)" },
@@ -912,9 +971,14 @@ Zotero.WorthYourRead = {
       h(doc, "div", { style: "display:flex;gap:8px;align-items:center;margin:6px 0 10px" },
         h(doc, "button", { dataset: { action: "ask-many" }, onclick: () => this.runAskMany(st),
           ...(st.running ? { disabled: "true" } : {}) }, st.result ? "Ask again" : "Ask"),
+        st.running ? null : h(doc, "label", {}, "reading the ", limit,
+          ` most relevant of ${st.items.length} papers `),
+        st.running ? null : estimate,
         st.running ? h(doc, "span", { dataset: { wyrProgress: "" } },
           st.progress?.stage === "paper" ? `Reading paper ${st.progress.paper} of ${st.progress.papers}: ${st.progress.label}…`
-            : st.progress?.stage === "merge" ? `Merging ${st.progress.claims} findings from ${st.progress.papers} papers…`
+            : st.progress?.stage === "merge" ? `Merging ${st.progress.claims} findings from ${st.progress.papers} papers`
+              + (st.progress.parts ? ` (part ${st.progress.part} of ${st.progress.parts})…` : "…")
+              : st.progress?.stage === "check" ? `Checking which findings back answer claim ${st.progress.claim} of ${st.progress.claims}…`
               : "Starting…") : null),
       st.error ? h(doc, "div", { style: "color:#b3261e" }, st.error) : null);
     if (st.result) root.append(this.renderAskManyResult(doc, st));
@@ -969,8 +1033,8 @@ Zotero.WorthYourRead = {
         h(doc, "b", {}, "Not addressed by these papers: "), r.not_addressed.join("; ")) : null,
       unused.length ? h(doc, "div", { style: "margin-top:6px;color:var(--fill-secondary)" },
         "Not cited in the answer: " + unused.map(p => `[${p.n}] ${p.label}`).join("; ")) : null,
-      r.skipped?.length ? h(doc, "div", { style: "margin-top:6px;color:var(--fill-secondary)" },
-        "Left out (no readable text, or beyond the 12 most relevant): " + r.skipped.join("; ")) : null,
+      leftOutLines(r).length ? h(doc, "div", { style: "margin-top:6px;color:var(--fill-secondary)" },
+        "Not read: " + leftOutLines(r).join("; ")) : null,
       grounded.length ? h(doc, "div", { style: "margin-top:12px" },
         st.note
           ? h(doc, "button", { dataset: { action: "ask-many-open-note" },
@@ -999,9 +1063,22 @@ Zotero.WorthYourRead = {
       return `<span class="citation" data-citation="${encodeURIComponent(JSON.stringify(citation))}">`
         + `${Zotero.EditorInstanceUtilities.formatCitation(citation)}</span>`;
     };
+    // Links into the library: the item itself, and its PDF at a page.
+    const reader = new Map();
+    for (const item of st.items) {
+      const att = await item.getBestAttachment();
+      if (att?.attachmentReaderType) reader.set(item.key, att);
+    }
+    const selectURL = (item) => `zotero://select/${libraryPath(item)}/items/${item.key}`;
+    const pdfURL = (item, page) => {
+      const att = reader.get(item.key);
+      return att && `zotero://open-pdf/${libraryPath(att)}/items/${att.key}${page ? `?page=${page}` : ""}`;
+    };
+    const itemOf = (n) => itemByKey.get(paperN.get(n)?.key);
     const parts = [`<h1>${esc(st.question)}</h1>`,
       `<p><em>Worth Your Read · ${esc(r.band)} confidence (${Number(r.confidence).toFixed(2)}) · `
-        + `answered from ${r.papers.length} papers; every quote below was found in the paper it cites.</em></p>`];
+        + `read ${r.papers.length} of ${st.items.length} papers; every quote below was found in the paper it cites. `
+        + `References and what to read are at the end.</em></p>`];
     const groundedClaims = r.claims.filter(c => c.status === "GROUNDED");
     const ordered = [...groundedClaims.filter(c => !c.extra), ...groundedClaims.filter(c => c.extra)];
     for (const c of ordered) {
@@ -1009,7 +1086,13 @@ Zotero.WorthYourRead = {
       const ok = c.sources.filter(s => s.verified);
       const papers = [...new Set(ok.map(s => s.paper))];
       parts.push(`<p>${esc(c.claim)} ${papers.map(n => cite(n)).join(" ")}</p>`);
-      for (const s of ok) parts.push(`<blockquote><p>“${esc(s.quote)}” ${cite(s.paper, s.page)}</p></blockquote>`);
+      for (const s of ok) {
+        const item = itemOf(s.paper);
+        const pdf = item && s.page && pdfURL(item, s.page), web = item && !pdf && onlineURL(item);
+        parts.push(`<blockquote><p>“${esc(s.quote)}” ${cite(s.paper, s.page)}`
+          + `${pdf ? ` <a href="${pdf}">open p. ${s.page}</a>` : web ? ` <a href="${esc(web)}">online</a>` : ""}`
+          + `</p></blockquote>`);
+      }
     }
     const ungrounded = r.claims.filter(c => c.status !== "GROUNDED");
     if (ungrounded.length) {
@@ -1019,6 +1102,7 @@ Zotero.WorthYourRead = {
     if (r.not_addressed?.length) {
       parts.push(`<p><strong>Not addressed by these papers:</strong> ${esc(r.not_addressed.join("; "))}</p>`);
     }
+    parts.push(...this.referencesHTML(st, { itemOf, selectURL, pdfURL }));
     const html = `<div data-schema-version="9" data-citation-items="`
       + `${encodeURIComponent(JSON.stringify([...stored.values()]))}">${parts.join("\n")}</div>`;
     const note = new Zotero.Item("note");
@@ -1030,6 +1114,67 @@ Zotero.WorthYourRead = {
     st.note = note;
     this.renderAskMany(st);
     return note;
+  },
+
+  /** The note's closing "References" section: every paper asked, each linked
+   * to the library (and its PDF), grouped by what you still need to read —
+   * highlighted: the papers the answer rests on, and the ones it never read. */
+  referencesHTML(st, { itemOf, selectURL, pdfURL }) {
+    const r = st.result;
+    const esc = Zotero.Utilities.htmlSpecialChars;
+    const mark = (color, text) => `<span style="background-color: ${color}">${esc(text)}</span>`;
+    const YELLOW = "#ffd40080", RED = "#ff666680";
+    const counts = new Map();             // paper n -> [main claims, further findings]
+    for (const c of r.claims.filter(c => c.status === "GROUNDED")) {
+      for (const n of new Set(c.sources.filter(s => s.verified).map(s => s.paper))) {
+        const k = counts.get(n) || [0, 0];
+        k[c.extra ? 1 : 0]++;
+        counts.set(n, k);
+      }
+    }
+    const entry = (item, label, notes) => {
+      if (!item) return `<li><p>${esc(label)}${notes.length ? ` — ${notes.join(" · ")}` : ""}</p></li>`;
+      const year = Zotero.Date.strToDate(item.getField("date") || "").year;
+      const who = item.firstCreator.replace(/[\u2066-\u2069]/g, "");
+      const journal = item.getField("publicationTitle");
+      const pdf = pdfURL(item), web = onlineURL(item);
+      return `<li><p>${esc([who, year && `(${year})`].filter(Boolean).join(" "))}${who || year ? ". " : ""}`
+        + `<a href="${selectURL(item)}">${richTitle(item)}</a>.`
+        + `${journal ? ` <em>${esc(journal)}</em>.` : ""}`
+        + `${pdf ? ` <a href="${pdf}">PDF</a>` : ""}${web ? ` <a href="${esc(web)}">Online</a>` : ""}${notes.length ? ` — ${notes.join(" · ")}` : ""}</p></li>`;
+    };
+    // Zotero titles may carry <sub>, <sup>, <i>, <b> (CO<sub>2</sub>): keep those, escape the rest.
+    const richTitle = (item) => esc(item.getDisplayTitle())
+      .replace(/&lt;(\/?)(sub|sup|i|b)&gt;/g, "<$1$2>");
+    const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+    const core = [], detail = [], nothing = [];
+    for (const p of r.papers) {
+      const [main, extra] = counts.get(p.n) || [0, 0];
+      const notes = [];
+      if (main) notes.push(plural(main, "answer claim") + (extra ? `, ${plural(extra, "further finding")}` : ""));
+      else if (extra) notes.push(`${plural(extra, "further finding")}`);
+      else notes.push(p.error ? "the model failed on this paper" : "nothing on the question found");
+      if (p.abstract_only && (main || extra)) notes.push(mark(RED, "Only the abstract was read") + " — get the full text");
+      (main ? core : extra ? detail : nothing).push([main, entry(itemOf(p.n), p.label, notes), extra]);
+    }
+    // Read first: the READ_FIRST papers the answer leans on most (answer
+    // claims, then further findings); the rest of the cited ones follow.
+    core.sort((a, b) => b[0] - a[0] || b[2] - a[2]);
+    const first = core.slice(0, READ_FIRST), alsoCited = core.slice(READ_FIRST);
+    for (const x of first) x[1] = x[1].replace("<li><p>", `<li><p>${mark(YELLOW, "Read first")} `);
+    const byKey = new Map(st.items.map(i => [i.key, i]));
+    const unread = (r.left_out || (r.skipped || []).map(label => ({ label }))).map(p =>
+      entry(byKey.get(p.key), p.label, [mark(RED, "Not read") + (p.reason ? ` — ${LEFT_OUT[p.reason] || p.reason}` : "")]));
+    const section = (title, items) => items.length ? [`<h3>${title}</h3>`, `<ol>${items.join("")}</ol>`] : [];
+    return ["<h2>References</h2>",
+      `<p>${mark(YELLOW, "Read first")}: the answer leans on these most. `
+        + `${mark(RED, "Not read")}: the assistant didn't read these, so the answer says nothing about them — read them yourself. `
+        + "Titles open the paper in your library; “PDF” opens your copy, “Online” the publisher's page.</p>",
+      ...section("Read first", first.map(x => x[1])),
+      ...section("Not read by the assistant", unread),
+      ...section("Also cited in the answer", alsoCited.map(x => x[1])),
+      ...section("Supporting detail", detail.map(x => x[1])),
+      ...section("Read, nothing on the question", nothing.map(x => x[1]))];
   },
 
   onSelectionPopup({ reader, doc, params, append }) {

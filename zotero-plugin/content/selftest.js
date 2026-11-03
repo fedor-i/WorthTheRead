@@ -47,6 +47,160 @@ Zotero.WorthYourReadSelfTest = {
       log("sectionRendered", !!body(paper.id)?.isConnected);
 
       const only = Zotero.Prefs.get("extensions.wyr.selftestOnly", true) || "";
+      if (only === "notes") {
+        // The ask-across note's links and References, from a made-up answer
+        // over the first papers of the iron collection. No model job runs.
+        const win = Zotero.getMainWindow();
+        const col = Zotero.Collections.getByLibrary(lib).find(c => c.name.startsWith("WYR: Is primary production"));
+        const st = WYR.openAskMany({ collection: col });
+        const items = st.items;
+        const att0 = await items[0].getBestAttachment();
+        log("tab", { limitInput: !!st.container.querySelector("[data-wyr-limit]"), maxPapers: st.maxPapers,
+          text: st.container.textContent.slice(0, 400) });
+        const p = (n, abstract_only = false) => ({ n, label: items[n - 1].getDisplayTitle().slice(0, 40),
+          key: items[n - 1].key, cited: 1, used: true, abstract_only });
+        const src = (paper, page) => ({ paper, quote: `SELFTEST quote ${paper}`, verified: true, page });
+        st.question = "SELFTEST notes: iron or nitrogen?";
+        st.result = { question: st.question, band: "Medium", confidence: 0.6, grounded: 3, ungrounded: 0,
+          merged: true, not_addressed: [],
+          papers: [p(1), p(2), p(3), p(4, true), { ...p(5), used: false, cited: 0 }],
+          claims: [
+            { claim: "Main claim from papers 1 and 2.", status: "GROUNDED", extra: false, sources: [src(1, 3), src(2, null)] },
+            { claim: "Main claim from paper 4 (abstract).", status: "GROUNDED", extra: false, sources: [src(4, null), src(1, 5)] },
+            { claim: "Further finding from paper 3.", status: "GROUNDED", extra: true, sources: [src(3, 2)] }],
+          skipped: [], left_out: [
+            { label: items[5].getDisplayTitle(), key: items[5].key, reason: "limit" },
+            { label: items[6].getDisplayTitle(), key: items[6].key, reason: "no_text" },
+            { label: "Unknown paper", key: "", reason: "load_failed" }] };
+        WYR.renderAskMany(st);
+        log("resultText", st.container.textContent.slice(-600));
+        const note = await WYR.saveAskManyNote(st);
+        const html = note.getNote();
+        log("noteHTML", { firstPaperHasPDF: !!att0?.attachmentReaderType,
+          select: (html.match(/zotero:\/\/select\//g) || []).length,
+          openPdf: (html.match(/zotero:\/\/open-pdf\//g) || []).length,
+          highlights: (html.match(/background-color/g) || []).length,
+          online: (html.match(/>Online</g) || []).length, onlineQuotes: (html.match(/>online</g) || []).length,
+          onlineSample: html.match(/href="(https?:[^"]+)">Online/)?.[1],
+          html: html.slice(html.indexOf("<h2>References")) });
+        win.Zotero_Tabs.close(st.tabID);
+        // Does Zotero's own note editor keep the links and highlights?
+        const { id: tabID, container } = win.Zotero_Tabs.add({ type: "wyr-selftest", title: "selftest", select: true, data: {} });
+        const editor = win.document.createXULElement("note-editor");
+        editor.style.cssText = "display:flex;height:100%";
+        container.append(editor);
+        editor.mode = "view";
+        editor.viewMode = "tab";
+        editor.item = note;
+        await delay(4000);
+        const idoc = editor.querySelector("iframe")?.contentDocument;
+        const pm = idoc?.querySelector(".ProseMirror");
+        log("editor", { found: !!pm,
+          links: pm ? [...pm.querySelectorAll('a[href^="zotero://"]')].map(a => a.getAttribute("href")).slice(0, 6) : null,
+          linkCount: pm?.querySelectorAll('a[href^="zotero://"]').length,
+          highlights: pm ? [...pm.querySelectorAll("span[style*=background]")].map(x => x.getAttribute("style")) : null,
+          text: pm?.textContent.slice(-900) });
+        win.Zotero_Tabs.close(tabID);
+        note.deleted = true;
+        await note.saveTx();
+        R.seconds = (Date.now() - t0) / 1000;
+        await save();
+        return;
+      }
+      if (only === "topicAsk") {
+        // Continue a topic run from its imported collection: drop duplicate
+        // collections of the same name (collections only — items stay), then
+        // ask across the fullest one and save the note there.
+        const win = Zotero.getMainWindow();
+        const question = Zotero.Prefs.get("extensions.wyr.selftestQuestion", true);
+        const name = `WYR: ${question.slice(0, 70)}`;
+        const cols = Zotero.Collections.getByLibrary(lib).filter(c => c.name === name)
+          .sort((a, b) => b.getChildItems().length - a.getChildItems().length);
+        const col = cols[0];
+        for (const dup of cols.slice(1)) await dup.eraseTx();
+        log("collection", { name: col.name, items: col.getChildItems().filter(i => i.isRegularItem()).length,
+          removedDuplicates: cols.length - 1 });
+        let t = Date.now();
+        const st = WYR.openAskMany({ collection: col });
+        st.question = question;
+        await WYR.runAskMany(st);
+        const r = st.result;
+        log("askMany", { s: (Date.now() - t) / 1000, error: st.error, band: r?.band, confidence: r?.confidence,
+          grounded: r?.grounded, ungrounded: r?.ungrounded, merged: r?.merged, skipped: r?.skipped,
+          left_out: r?.left_out, truncated: r?.truncated,
+          not_addressed: r?.not_addressed, papers: r?.papers.map(p => [p.n, p.cited, p.abstract_only, p.label]),
+          claims: (r?.claims || []).map(c => [c.status, c.extra ? "extra" : "main", c.claim,
+            c.sources.map(x => [x.paper, x.page, x.quote.slice(0, 100)])]) });
+        if (r?.claims?.some(c => c.status === "GROUNDED")) {
+          const note = await WYR.saveAskManyNote(st);
+          const html = note.getNote();
+          log("note", { id: note.id, inCollection: note.inCollection(col.id),
+            citations: (html.match(/class="citation"/g) || []).length,
+            select: (html.match(/zotero:\/\/select\//g) || []).length,
+            pageLinks: (html.match(/>open p\. /g) || []).length,
+            online: (html.match(/>[Oo]nline</g) || []).length,
+            references: html.slice(html.indexOf("<h2>References")).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ") });
+        }
+        win.Zotero_Tabs.close(st.tabID);
+        R.seconds = (Date.now() - t0) / 1000;
+        await save();
+        return;
+      }
+      if (only === "topic") {
+        // A whole topic, end to end: research → import → ask across the collection → note.
+        const win = Zotero.getMainWindow();
+        const question = Zotero.Prefs.get("extensions.wyr.selftestQuestion", true);
+        let t = Date.now();
+        const rs = WYR.openResearch({ question, title: question, autostart: true, maxPapers: 60 });
+        await until(() => !rs.running && (rs.result || rs.error), 1800000);
+        const res = rs.result;
+        log("research", { s: (Date.now() - t) / 1000, error: rs.error, summary: res?.summary,
+          rounds: res?.rounds, stopped: res?.stopped,
+          papers: (res?.papers || []).map(p => [p.relevance ?? "seed", p.round, p.cited_core ? "core" : "",
+            p.year, (p.title || "").slice(0, 90), p.doi || ""]) });
+        await save();
+        if (!res) throw new Error("research failed: " + rs.error);
+        // Import the strongest: every relevance-3 paper, then relevance 2 by support, up to 25.
+        const ranked = res.papers.filter(p => p.doi && !p.cited_core)
+          .sort((a, b) => (b.relevance ?? 3) - (a.relevance ?? 3) || (b.support || 0) - (a.support || 0));
+        rs.selected = new Set(ranked.filter(p => (p.relevance ?? 3) >= 2).slice(0, 25).map(p => p.id));
+        t = Date.now();
+        await WYR.importResearch(rs);
+        const col = Zotero.Collections.get(rs.collectionID);
+        const items = col.getChildItems().filter(i => i.isRegularItem());
+        const withPDF = [];
+        for (const i of items) if (await i.getBestAttachment()) withPDF.push(i.id);
+        log("import", { s: (Date.now() - t) / 1000, msg: rs.importMsg, collection: col.name,
+          items: items.length, withPDF: withPDF.length });
+        await save();
+        win.Zotero_Tabs.close(rs.tabID);
+
+        t = Date.now();
+        const st = WYR.openAskMany({ collection: col });
+        st.question = question;
+        await WYR.runAskMany(st);
+        const r = st.result;
+        log("askMany", { s: (Date.now() - t) / 1000, error: st.error, band: r?.band, confidence: r?.confidence,
+          grounded: r?.grounded, ungrounded: r?.ungrounded, merged: r?.merged, skipped: r?.skipped,
+          left_out: r?.left_out, truncated: r?.truncated,
+          not_addressed: r?.not_addressed, papers: r?.papers.map(p => [p.n, p.cited, p.abstract_only, p.label]),
+          claims: (r?.claims || []).map(c => [c.status, c.extra ? "extra" : "main", c.claim,
+            c.sources.map(x => [x.paper, x.page, x.quote.slice(0, 100)])]) });
+        if (r?.claims?.some(c => c.status === "GROUNDED")) {
+          const note = await WYR.saveAskManyNote(st);
+          const html = note.getNote();
+          log("note", { id: note.id, inCollection: note.inCollection(col.id),
+            citations: (html.match(/class="citation"/g) || []).length,
+            select: (html.match(/zotero:\/\/select\//g) || []).length,
+            pageLinks: (html.match(/>open p\. /g) || []).length,
+            online: (html.match(/>[Oo]nline</g) || []).length,
+            references: html.slice(html.indexOf("<h2>References")).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ") });
+        }
+        win.Zotero_Tabs.close(st.tabID);
+        R.seconds = (Date.now() - t0) / 1000;
+        await save();
+        return;
+      }
       if (only === "live2") {
         // Approved live run: one cross-paper question, one manuscript re-check.
         const win = Zotero.getMainWindow();

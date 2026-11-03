@@ -1,6 +1,7 @@
 """Offline tests for the guard, focus, local-library and sidecar plumbing.
 No model and no network: run with `python -m pytest worth_your_read/tests`."""
 import json
+import re
 
 import pytest
 
@@ -162,7 +163,7 @@ def test_ask_many_asks_each_paper_then_merges_by_claim_id(monkeypatch):
     # the fabricated per-paper quote ("doubled lifespan") never reaches the answer
     assert "doubled" not in json.dumps(r["claims"])
     assert r["merged"] and r["skipped"] == ["Empty"] and all(p["used"] for p in r["papers"])
-    assert [p["stage"] for p in seen] == ["paper", "paper", "merge"] and r["not_addressed"] == ["cost"]
+    assert [p["stage"] for p in seen] == ["paper", "paper", "merge", "check"] and r["not_addressed"] == ["cost"]
     assert 0 < r["confidence"] <= 0.7
 
 
@@ -182,8 +183,85 @@ def test_ask_many_keeps_findings_the_merge_drops_or_garbles(monkeypatch):
 def test_ask_many_caps_papers_and_reports_the_rest(monkeypatch):
     monkeypatch.setattr(answer, "_complete", lambda s, u, max_tokens=1500: "{}")
     papers = [_paper(f"P{i}", "metformin lifespan " * (i + 1)) for i in range(answer.MAX_PAPERS + 3)]
-    r = answer.ask_many("metformin lifespan", papers)
+    r = answer.ask_many("metformin lifespan", papers, max_papers=answer.MAX_PAPERS)
     assert len(r["papers"]) == answer.MAX_PAPERS and len(r["skipped"]) == 3
+    assert [x["reason"] for x in r["left_out"]] == ["limit"] * 3
+    # The limit is the caller's to set; unreadable papers are reported apart.
+    r = answer.ask_many("metformin lifespan", papers + [_paper("Empty", "")], max_papers=4)
+    assert len(r["papers"]) == 4
+    assert sorted(x["reason"] for x in r["left_out"]) == ["limit"] * (len(papers) - 4) + ["no_text"]
+
+
+def test_ask_many_merges_many_findings_in_parts(monkeypatch):
+    # 30 papers x 1 finding, batches of 8: no merge call ever sees more than 8
+    # claims, every paper is still read, and the final claim rests on papers
+    # from different parts.
+    monkeypatch.setattr(answer, "MERGE_BATCH", 8)
+    sizes = []
+    def complete(system, user, max_tokens=1500):
+        if system != answer._MERGE_SYSTEM:
+            return json.dumps({"claims": [{"claim": "Users lived longer.",
+                                           "quotes": ["metformin users lived longer than matched controls"]}]})
+        n = len(re.findall(r"\nC\d+ ", user))
+        sizes.append(n)
+        # merge the first two claims of whatever it is given
+        return json.dumps({"claims": [{"claim": "Merged.", "from": ["C1", "C2"]}]})
+    monkeypatch.setattr(answer, "_complete", complete)
+    papers = [_paper(f"P{i}", _B_TEXT) for i in range(30)]
+    r = answer.ask_many("Did users live longer?", papers)
+    assert len(r["papers"]) == 30 and not r["skipped"] and max(sizes) <= 8
+    main = [c for c in r["claims"] if not c["extra"]]
+    assert len(main) == 1 and len({s["paper"] for s in main[0]["sources"]}) == 4
+    # nothing is lost: every paper's finding is in the answer, merged or as a further finding
+    assert {s["paper"] for c in r["claims"] for s in c["sources"]} == set(range(1, 31))
+
+
+def test_ask_many_prunes_findings_that_do_not_back_the_merged_claim(monkeypatch):
+    # The merge lumps both findings under one sentence; the check keeps only C1.
+    merge = json.dumps({"claims": [{"claim": "Mortality fell by 12%.", "from": ["C1", "C2"]},
+                                   {"claim": "Something neither says.", "from": ["C1", "C2"]}]})
+    base = _fake_model(merge)
+    asked = []
+    def complete(system, user, max_tokens=1500):
+        if system == answer._SUPPORT_SYSTEM:
+            asked.append(user)
+            return json.dumps({"support": ["C1"] if "12%" in user.split("FINDINGS")[0] else []})
+        return base(system, user, max_tokens)
+    monkeypatch.setattr(answer, "_complete", complete)
+    seen = []
+    r = answer.ask_many("Does metformin extend life?", [_paper("Trial A", _A_TEXT), _paper("Cohort B", _B_TEXT)],
+                        progress=seen.append)
+    first, second = r["claims"][0], r["claims"][1]
+    assert {s["paper"] for s in first["sources"]} == {1}
+    assert second["status"] == "UNGROUNDED" and not second["sources"]
+    # Cohort B's finding, pruned from both, is still in the answer as a further finding
+    assert [c["claim"] for c in r["claims"] if c["extra"]] == ["Users lived longer."]
+    assert len(asked) == 2 and [p["stage"] for p in seen].count("check") == 2
+    # A check that doesn't answer leaves the merge's ids as they were.
+    monkeypatch.setattr(answer, "_complete", lambda s, u, max_tokens=1500:
+                        "garbled" if s == answer._SUPPORT_SYSTEM else base(s, u, max_tokens))
+    r = answer.ask_many("Does metformin extend life?", [_paper("Trial A", _A_TEXT), _paper("Cohort B", _B_TEXT)])
+    assert {s["paper"] for s in r["claims"][0]["sources"]} == {1, 2}
+
+
+def test_merge_batches_keep_a_papers_findings_together():
+    found = [(n, "x", []) for n in (1, 1, 1, 2, 2, 3, 3, 3)]
+    items = [("x", {i}) for i in range(len(found))]
+    parts = answer._batches(items, found, 4)
+    assert [[min(found[j][0] for j in it[1]) for it in p] for p in parts] == [[1, 1, 1], [2, 2], [3, 3, 3]]
+
+
+def test_ask_many_drops_findings_about_the_paper_itself(monkeypatch):
+    def complete(system, user, max_tokens=1500):
+        if system == answer._MERGE_SYSTEM:
+            return "{}"
+        return json.dumps({"claims": [
+            {"claim": "The study does not explicitly state where mortality fell.",
+             "quotes": ["Metformin lowered all-cause mortality by 12%"]},
+            {"claim": "Mortality fell by 12%.", "quotes": ["Metformin lowered all-cause mortality by 12%"]}]})
+    monkeypatch.setattr(answer, "_complete", complete)
+    r = answer.ask_many("Does metformin extend life?", [_paper("Trial A", _A_TEXT), _paper("Trial A2", _A_TEXT)])
+    assert [c["claim"] for c in r["claims"]] == ["Mortality fell by 12%."] * 2
 
 
 # --- disk cache + sidecar --------------------------------------------------------------
