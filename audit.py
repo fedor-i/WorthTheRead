@@ -92,8 +92,16 @@ def _find_section(root, keyword):
     return best
 
 
-_SENT = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9])")
 _MARK = re.compile(r"\[\[([^\]]*)\]\]")
+# A sentence = text up to a terminator, PLUS the run of citation markers that
+# trail it. In JATS the <xref> markers sit right after the period
+# (`management. [[b1]] , [[b2]] The clinical…`), so a plain "period + space +
+# capital" split never fires and the whole paragraph collapses into one claim
+# with every citation lumped onto it. Here g1 is the sentence (its terminator a
+# `.` not inside a decimal like "2.4", or `!`/`?`) and g2 is the trailing marker
+# group, so each sentence keeps exactly the references the authors put on it.
+_SENT_RE = re.compile(
+    r"(.*?(?:[!?]|(?<!\d)\.(?!\d)))(\s*(?:\[\[[^\]]+\]\]\s*,?\s*)*)", re.S)
 
 
 def _segment_section(sec, ref_map, max_claims):
@@ -105,12 +113,19 @@ def _segment_section(sec, ref_map, max_claims):
     for p in sec.iter():
         if _ln(p) != "p":
             continue
-        para = []
-        for sent in _SENT.split(_flatten(p)):
+        flat = re.sub(r"[ \t]+", " ", _flatten(p))
+        para, pos = [], 0
+        for m in _SENT_RE.finditer(flat):
+            g1, g2 = m.group(1), m.group(2)
+            pos = m.end()
             rids = []
-            for m in _MARK.findall(sent):
-                rids += [r for r in m.split() if r]
-            text = re.sub(r"\s+", " ", _MARK.sub("", sent)).strip()
+            for mk in _MARK.findall(g1) + _MARK.findall(g2):
+                rids += [r for r in mk.split() if r]
+            text = re.sub(r"\s+", " ", _MARK.sub("", g1))
+            text = re.sub(r"\s+([,.;:])", r"\1", text)
+            text = re.sub(r",(?:\s*,)+", ",", text)        # collapse comma runs left by removed markers
+            text = re.sub(r",(\s*[.;:])", r"\1", text)      # drop a comma orphaned before a terminator
+            text = re.sub(r",(?=\S)", ", ", text).strip(" ,")
             if not text:
                 continue
             seg = {"text": text, "claim_idx": None}
@@ -120,6 +135,9 @@ def _segment_section(sec, ref_map, max_claims):
                 seg["claim_idx"] = len(claims)
                 claims.append({"claim": text, "cited": cited})
             para.append(seg)
+        tail = re.sub(r"\s+", " ", _MARK.sub("", flat[pos:])).strip(" ,")
+        if tail:
+            para.append({"text": tail, "claim_idx": None})
         if para:
             paragraphs.append(para)
     return claims, paragraphs
@@ -195,8 +213,30 @@ async def run_audit(reference, verify_fn, max_claims=8, section="introduc"):
         item["card"] = res.get("card")
         counts[item["verdict"]] = counts.get(item["verdict"], 0) + 1
     out["claims"] = claims
+    # `counts` is the verdict histogram the renderers use; `summary` carries the
+    # same dict here but server.audit_paper overwrites it with a plain-English
+    # string for the MCP response, so the renderers must not depend on it.
+    out["counts"] = counts
     out["summary"] = counts
     return out
+
+
+def _counts(out):
+    """Verdict histogram for the renderers. Prefers the stable `counts` key;
+    falls back to `summary` when it's still a dict, else recomputes from claims
+    (server.audit_paper replaces `summary` with a plain-English string)."""
+    c = out.get("counts")
+    if isinstance(c, dict):
+        return c
+    s = out.get("summary")
+    if isinstance(s, dict):
+        return s
+    counts = {}
+    for cl in out.get("claims", []):
+        v = cl.get("verdict")
+        if v:
+            counts[v] = counts.get(v, 0) + 1
+    return counts
 
 
 def _render(out):
@@ -206,7 +246,7 @@ def _render(out):
         lines.append("\n" + out.get("note", "Could not audit this paper."))
         return "\n".join(lines)
     lines.append(f"\nSection: **{out['section']}** · "
-                 + " · ".join(f"{k}: {v}" for k, v in out["summary"].items()))
+                 + " · ".join(f"{k}: {v}" for k, v in _counts(out).items()))
     for i, c in enumerate(out["claims"], 1):
         va = c.get("verified_against") or {}
         src = f" — cites *{(va.get('title') or va.get('doi') or '?')[:70]}*" if va else ""
@@ -279,7 +319,7 @@ def render_html(out):
                 f'<div class="src">cites: {srcline}</div>'
                 f'{f"<div class=why>{why}</div>" if why else ""}{sugline}</div></div>')
         detail = "\n".join(rows)
-        summ = " · ".join(f'<b class="v-{k}">{k}</b>: {v}' for k, v in out.get("summary", {}).items())
+        summ = " · ".join(f'<b class="v-{k}">{k}</b>: {v}' for k, v in _counts(out).items())
         body = f'<p class="meta">Section: <b>{_h.escape(out.get("section",""))}</b> · {summ}</p>'
     doiline = f'<p class="meta"><a href="https://doi.org/{_h.escape(doi)}" target="_blank">{_h.escape(doi)}</a> · open-access full text via Europe PMC</p>' if doi else ""
     css = """

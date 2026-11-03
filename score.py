@@ -56,7 +56,7 @@ def score_answer(results: list, min_confidence: float = 0.0) -> dict:
             "claims_supported": 1,
             "_sort": (_VERDICT_RANK.get(r.get("verdict"), 9),
                       -float(r.get("confidence", 0.0)),
-                      0 if r.get("has_results") else 1),
+                      0 if r.get("has_fulltext", r.get("has_results")) else 1),
         }
         if key not in by_key:
             by_key[key] = entry
@@ -87,7 +87,7 @@ def score_answer(results: list, min_confidence: float = 0.0) -> dict:
 
 def _why(r: dict) -> str:
     v = r.get("verdict")
-    src = "results-level" if r.get("has_results") else "abstract-only"
+    src = "full-text" if r.get("has_fulltext", r.get("has_results")) else "abstract-only"
     if v == "SUPPORTED":
         return f"Directly supported at {src} with verified quotes."
     if v == "OVERSTATED":
