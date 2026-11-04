@@ -64,3 +64,46 @@ primary production in one-third of the world ocean (Boyd 2007), specifically in
 HNLC areas (Moore 2013; Okin 2011)". One fix followed: a paper backing two
 parts (Bonnet: station GYR and station EGY) was cited only at the first. It is
 now cited at each part.
+
+## D. Three more questions (batch, 2026-11-03)
+Same experiment, three methods each over one shared set of findings. All output
+pairs were labelled by hand and added to `multi_source_gold.jsonl` (ids
+`ironq-*`, `false-*`, `metf-*`; 118 pairs, `unit: "finding"`).
+
+| question | papers | findings | map | sentences (merge) |
+|---|---|---|---|---|
+| Q1 iron: how much did iron additions raise biomass/productivity? | 19 | 19 | 126 s | 8 |
+| Q2 why most published findings may be false, and responses (5 papers) | 5 | 24 | 73 s | 10 |
+| Q3 metformin: mortality / lifespan in humans (Research, top 25 of 60) | 25 | 77 | 280 s | 28 |
+
+Kept sources, merge + check (86 pairs):
+
+| | precision | recall* | wrong sources | good ones cut |
+|---|---|---|---|---|
+| part check (default) | 97.6% | 100% | 2 (Q3 s13: all-trials RR 0.94 and "no significant effect" under a placebo-trials sentence) | 0 |
+| whole-sentence check | 100% | 97.6% | 0 | 2 (Q2 Djulbegovic; Q3 RR 0.91) |
+
+*Recall counts only candidates that at least one method kept, so it is
+overstated for both. Precision is reliable.
+
+Group-first + part check: no wrong sources in Q1/Q2, but lower coverage (Q2
+dropped Wacholder's genetic findings and the preprint paper). On Q3's 77
+findings it wrote **1 sentence**: it does not scale as built.
+
+Where the remaining errors are now — the merged sentence, not its sources:
+- **Garbled number:** "24% to 61%" became "2ly% to 61%" (Q3 s9). Added
+  `_unsourced_numbers`: a merged claim with a figure that is in none of its
+  findings is flagged (`unsourced_numbers`). Over all 128 merged sentences from
+  the four questions it flags exactly that one (plus, under the
+  whole-sentence check, Q3 s13's 0.94/0.91, whose sources it had cut). No false
+  alarms after skipping CO2-style formulas and "type 2"-style labels.
+- **Id markers leaked into the text** ("[C6]"): only "[P1]" markers were
+  stripped. Now all [P/C/G n] markers are.
+- **Wrong scope:** Q3 s13 states the all-trials RR as a placebo-trials figure.
+  The numbers exist, so the guard can't see it. It needs a sentence-level check.
+- **"Another study":** Q3 s8 presents three results from one meta-analysis as
+  different studies.
+- **Too long:** Q3's merge gave 28 sentences, and the second merge didn't
+  shorten them. The cause is not yet known.
+- **Disagreement isn't brought out:** Goodman & Greenland's critique of "most
+  findings are false" only appears as a list of causes.

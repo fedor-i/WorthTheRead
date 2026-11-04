@@ -46,7 +46,9 @@ it (same region, population, outcome), and its citation is placed right after
 the words it backs: "Iron limits a third of the ocean (Boyd 2007), specifically
 the HNLC areas (Okin 2011)". Findings that back no part of it stay in the note
 as further findings. If the model returns more than 10 answer claims, they are
-merged once more.
+merged once more. A merged claim containing a number that appears in none of its
+findings (the merge once turned "24%" into "2ly%") is flagged in red, in the
+tab and in the note.
 About 20 seconds per paper on gemma4:26b. **Save as note with
 citations** stores it as a note with live Zotero citations (page locators
 included), which Zotero's Word/LibreOffice plugin can insert with *Add Note*.

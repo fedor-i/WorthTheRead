@@ -12,7 +12,10 @@ Runs the configured model (set WYR_USE_OLLAMA=1 for the local one).
            for labelling.
 
     python benchmark/multi_source_experiment.py checks OUT
-    python benchmark/multi_source_experiment.py run OUT ZOTERO_SQLITE_COPY "COLLECTION NAME" "QUESTION"
+    python benchmark/multi_source_experiment.py run OUT ZOTERO_SQLITE_COPY SOURCE "QUESTION"
+    SOURCE: a collection name, "keys:KEY1,KEY2" (Zotero item keys), or
+    "research:N" (snowball the question with research.py, read the N most
+    relevant papers online; ZOTERO_SQLITE_COPY is then unused)
     (METHODS=merge,grouped to run only some; findings are reused from OUT)
 """
 import json
@@ -61,17 +64,35 @@ def checks(out):
     print("parts:", json.dumps(parts_seen, indent=1, ensure_ascii=False))
 
 
+def papers_from_research(question, n):
+    """[{label, key, spec}] for the n most relevant papers a research run finds."""
+    from worth_your_read import research
+    t = time.time()
+    r = research.snowball(question, max_papers=60,
+                          progress=lambda p: print(p.get("stage", ""), end=" ", flush=True))
+    found = sorted((p for p in r["papers"] if (p.get("relevance") or 0) >= 2 and p.get("doi")),
+                   key=lambda p: (-p["relevance"], -(p.get("cited_by") or 0)))[:n]
+    print(f"\nresearch: {len(r['papers'])} papers, {len(found)} used, {time.time() - t:.0f}s")
+    return [{"label": f"{p['title'][:60]} ({p.get('year')})", "key": p["doi"],
+             "spec": {"title": p["title"], "reference": p["doi"]}} for p in found]
+
+
 def papers_from_zotero(db_path, collection):
-    """[{label, key, spec}] for the regular items of a collection."""
+    """[{label, key, spec}] for the regular items of a collection, or for
+    "keys:K1,K2" — those items."""
     db = sqlite3.connect(db_path)
     field = lambda iid, name: (db.execute(
         "SELECT v.value FROM itemData d JOIN fields f USING(fieldID) JOIN itemDataValues v USING(valueID)"
         " WHERE d.itemID = ? AND f.fieldName = ?", (iid, name)).fetchone() or [""])[0]
-    coll = db.execute("SELECT collectionID FROM collections WHERE collectionName = ?", (collection,)).fetchone()[0]
-    rows = db.execute(
-        "SELECT i.itemID, i.key FROM collectionItems ci JOIN items i USING(itemID)"
-        " JOIN itemTypes t USING(itemTypeID) WHERE ci.collectionID = ? AND t.typeName NOT IN"
-        " ('note', 'attachment', 'annotation') ORDER BY ci.orderIndex", (coll,)).fetchall()
+    if collection.startswith("keys:"):
+        keys = collection[5:].split(",")
+        rows = [db.execute("SELECT itemID, key FROM items WHERE key = ?", (k,)).fetchone() for k in keys]
+    else:
+        coll = db.execute("SELECT collectionID FROM collections WHERE collectionName = ?", (collection,)).fetchone()[0]
+        rows = db.execute(
+            "SELECT i.itemID, i.key FROM collectionItems ci JOIN items i USING(itemID)"
+            " JOIN itemTypes t USING(itemTypeID) WHERE ci.collectionID = ? AND t.typeName NOT IN"
+            " ('note', 'attachment', 'annotation') ORDER BY ci.orderIndex", (coll,)).fetchall()
     out = []
     for iid, key in rows:
         names = [r[0] for r in db.execute(
@@ -100,7 +121,9 @@ def run(out, db_path, collection, question):
         found = [tuple(x) for x in saved["found"]]
     else:
         chosen = []
-        for p in papers_from_zotero(db_path, collection):
+        source = (papers_from_research(question, int(collection[9:])) if collection.startswith("research:")
+                  else papers_from_zotero(db_path, collection))
+        for p in source:
             try:
                 fetched, pages, _ = sidecar._load(sidecar.Paper(**p["spec"]))
             except Exception:

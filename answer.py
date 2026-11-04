@@ -181,7 +181,7 @@ def _merge(question: str, chosen: list, found: list, items: list) -> tuple:
             if m and 1 <= int(m.group(0)) <= len(items):
                 ids |= items[int(m.group(0)) - 1][1]
         # The model echoes "[P1, P3]"; the citations come from the ids.
-        merged.append((re.sub(r"\s*\[(?:P\d+[,;\s]*)+\]", "", c["claim"]).strip(), ids))
+        merged.append((_strip_ids(c["claim"]), ids))
     return merged, data
 
 
@@ -254,6 +254,29 @@ def _supporting_parts(sentence: str, found: list, ids: set) -> tuple:
             if backs == "part" and part and part in sentence and part != sentence.rstrip("."):
                 parts[i] = part
     return keep, parts
+
+
+def _strip_ids(text: str) -> str:
+    """Drop the ids the model echoes ("[P1, P3]", "[C6]", "[G2]"); the
+    citations come from the ids it listed, not from the text."""
+    return re.sub(r"\s*\[(?:[PCG]\d+[,;\s]*)+\]", "", text).strip()
+
+
+# A figure, not a label: skip digits stuck to letters (CO2, Fe3+) and the
+# "type 2" / "phase 3" kind of name, which findings often leave implicit.
+_NUMBER = re.compile(r"(?<![A-Za-z\d.,])(?<!type )(?<!phase )(?<!stage )(?<!grade )\d+(?:[.,]\d+)*", re.I)
+
+
+def _numbers(text: str) -> set:
+    return {n.replace(",", "") for n in _NUMBER.findall(text.replace("\u2212", "-"))}
+
+
+def _unsourced_numbers(sentence: str, texts: list) -> list:
+    """Numbers in a merged sentence that appear in none of its findings or
+    quotes. The merge rewrites findings, and a local model can garble a figure
+    on the way ("24%" became "2ly%"); nothing else checks the numbers."""
+    have = set().union(*(_numbers(t) for t in texts)) if texts else set()
+    return sorted(_numbers(sentence) - have, key=sentence.find)
 
 
 def _batches(items: list, found: list, size: int) -> list:
@@ -415,12 +438,27 @@ def _combine_grouped(question: str, chosen: list, found: list, report) -> tuple:
         k = int(m.group(0)) - 1 if m else -1
         if 0 <= k < len(groups) and k not in used:
             used.add(k)
-            final.append((re.sub(r"\s*\[(?:[PG]\d+[,;\s]*)+\]", "", c["claim"]).strip(), set(groups[k]), {}))
+            final.append((_strip_ids(c["claim"]), set(groups[k]), {}))
     return final, _strings(data.get("not_addressed")), truncated or bool(data.get("truncated"))
 
 
+def _combine_grouped_parts(question: str, chosen: list, found: list, report) -> tuple:
+    """Group first, then the part check on each written sentence: the group
+    proposes the sources, the check drops any the sentence doesn't use."""
+    final, not_addressed, truncated = _combine_grouped(question, chosen, found, report)
+    checked = []
+    for k, (text, ids, _) in enumerate(final, 1):
+        where = {}
+        if len(ids) > 1:
+            report(stage="check", claim=k, claims=len(final))
+            ids, where = _supporting_parts(text, found, ids)
+        checked.append((text, ids, where))
+    return checked, not_addressed, truncated
+
+
 COMBINE = {"merge": _combine_merge, "grouped": _combine_grouped,
-           "merge_whole": lambda *a: _combine_merge(*a, parts=False)}
+           "merge_whole": lambda *a: _combine_merge(*a, parts=False),
+           "grouped_parts": _combine_grouped_parts}
 
 
 def ask_many(question: str, papers: list, progress=None, max_papers: int = None,
@@ -469,7 +507,9 @@ def ask_many(question: str, papers: list, progress=None, max_papers: int = None,
             sources = [dict(source(found[i][0], q), part=where.get(i)) for i in sorted(ids) for q in found[i][2]]
             used |= ids
             merged.append({"claim": text, "sources": sources, "extra": False,
-                           "status": "GROUNDED" if sources else "UNGROUNDED"})
+                           "status": "GROUNDED" if sources else "UNGROUNDED",
+                           "unsourced_numbers": _unsourced_numbers(
+                               text, [t for i in ids for t in [found[i][1], *found[i][2]]])})
         out["merged"] = bool(merged)
     else:
         out["not_addressed"] = gaps[:3]

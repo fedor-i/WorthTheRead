@@ -1028,8 +1028,11 @@ Zotero.WorthYourRead = {
     const main = grounded.filter(c => !c.extra), extra = grounded.filter(c => c.extra);
     const ungrounded = r.claims.filter(c => c.status !== "GROUNDED");
     const unused = r.papers.filter(p => !p.used);
+    const numbersWarning = (c) => c.unsourced_numbers?.length ? h(doc, "div", { style: "color:#b3261e" },
+      `Check this: ${c.unsourced_numbers.join(", ")} is not in any of its sources — the merge may have changed a figure.`) : null;
     const claimList = (list) => h(doc, "ol", { style: "padding-left:20px" }, list.map(c =>
-      h(doc, "li", { style: "margin-bottom:8px" }, c.claim, c.sources.filter(s => s.verified).map(sourceLine))));
+      h(doc, "li", { style: "margin-bottom:8px" }, c.claim, numbersWarning(c),
+        c.sources.filter(s => s.verified).map(sourceLine))));
     if (!r.claims.length) {
       return h(doc, "div", { style: "color:#b3261e" },
         r.truncated
@@ -1107,7 +1110,9 @@ Zotero.WorthYourRead = {
     for (const c of ordered) {
       if (c.extra && c === ordered.find(x => x.extra)) parts.push("<h2>Further findings from individual papers</h2>");
       const ok = c.sources.filter(s => s.verified);
-      parts.push(`<p>${citedClaimHTML(c.claim, ok, n => cite(n))}</p>`);
+      const warn = c.unsourced_numbers?.length
+        ? ` <span style="background-color: #ff666680">Check: ${esc(c.unsourced_numbers.join(", "))} is not in its sources</span>` : "";
+      parts.push(`<p>${citedClaimHTML(c.claim, ok, n => cite(n))}${warn}</p>`);
       for (const s of ok) {
         const item = itemOf(s.paper);
         const pdf = item && s.page && pdfURL(item, s.page), web = item && !pdf && onlineURL(item);

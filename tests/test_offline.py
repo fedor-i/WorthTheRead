@@ -306,6 +306,20 @@ def test_an_over_long_merge_is_merged_once_more(monkeypatch):
     assert {s["paper"] for s in main[0]["sources"]} == {1, 2}
 
 
+def test_merged_sentence_numbers_must_come_from_its_findings(monkeypatch):
+    assert answer._unsourced_numbers("a 2ly% to 61% excess risk",
+                                     ["a significant 24% to 61% excess risk (P<0.001)"]) == ["2"]
+    assert answer._unsourced_numbers("rose from 10,000 to 48.5 mg (\u22121.2)",
+                                     ["10000 then 48.5", "-1.2"]) == []
+    assert answer._strip_ids("Mortality fell [C6], and rose [C1, C17] [P2].") == "Mortality fell, and rose."
+    assert answer._unsourced_numbers("In type 2 diabetes, CO2 fell by 30%", ["CO2 fell by 30%"]) == []
+    merge = json.dumps({"claims": [{"claim": "Mortality fell by 21% [C1].", "from": ["C1"]}]})
+    monkeypatch.setattr(answer, "_complete", _fake_model(merge))
+    r = answer.ask_many("Does metformin extend life?", [_paper("Trial A", _A_TEXT), _paper("Cohort B", _B_TEXT)])
+    first = r["claims"][0]
+    assert first["claim"] == "Mortality fell by 21%." and first["unsourced_numbers"] == ["21"]
+
+
 def test_merge_batches_keep_a_papers_findings_together():
     found = [(n, "x", []) for n in (1, 1, 1, 2, 2, 3, 3, 3)]
     items = [("x", {i}) for i in range(len(found))]
