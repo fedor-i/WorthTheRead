@@ -63,3 +63,17 @@ first-class label, (2) grounding in **full-text results**, not just abstracts,
 a single product-oriented **false-SUPPORTED** safety metric. It is a small seed,
 not a peer-reviewed corpus; SciFact-scale claim sets (and the DeSpin spin corpus)
 are the natural source to grow it.
+
+## Multi-source attribution set
+When *Ask across papers* merges findings from several papers into one answer
+sentence, does each cited source actually back that sentence?
+`multi_source_gold.jsonl` has 47 (answer sentence, cited quote) pairs from the
+iron-vs-nitrogen run (11 sentences, 2026-11-03), labelled `backs` (supports the
+whole sentence alone), `partly` (supports one distinct part of it, same place
+and subject; WiCE-style partial support) or `no` (other region, nutrient or
+result). `sure: false` marks four judgement calls. A source should be kept if
+it backs or partly backs. `multi_source_score.py` scores a method's
+keep/cut decisions (`{"method", "keep": {id: bool}}`): precision, recall
+(split into full and partial support), sentences left citing a wrong source,
+sentences left with no support. No model runs in the scorer.
+`multi_source_baseline.json` is the current per-claim support check.

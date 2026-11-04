@@ -41,8 +41,12 @@ findings, never write quotes, and any finding it leaves out is still listed.
 With many papers the findings are merged in parts of at most 24, then the
 parts merged, so no single model call has to juggle them all.
 Then each answer claim that rests on several findings is checked against them
-in one short call, and keeps only the findings that back it (same region,
-population, outcome); the others stay in the note as further findings.
+in one short call. A finding stays if it backs the whole claim or one part of
+it (same region, population, outcome), and its citation is placed right after
+the words it backs: "Iron limits a third of the ocean (Boyd 2007), specifically
+the HNLC areas (Okin 2011)". Findings that back no part of it stay in the note
+as further findings. If the model returns more than 10 answer claims, they are
+merged once more.
 About 20 seconds per paper on gemma4:26b. **Save as note with
 citations** stores it as a note with live Zotero citations (page locators
 included), which Zotero's Word/LibreOffice plugin can insert with *Add Note*.

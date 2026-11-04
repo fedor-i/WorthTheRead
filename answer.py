@@ -123,6 +123,7 @@ def ask(question: str, fetched: dict, check: bool = False) -> dict:
 
 MAX_PAPERS = 12        # the plugin's default when the user doesn't choose
 MERGE_BATCH = 24       # findings per merge call; past this a local model starts dropping papers
+MAX_ANSWER_CLAIMS = 10  # the merge prompt's "at most 10"; a longer answer is merged once more
 
 _MERGE_SYSTEM = """You merge findings from SEVERAL papers into one answer to a \
 QUESTION. You get numbered CLAIMS, each already checked against the paper in \
@@ -213,6 +214,48 @@ def _supporting(sentence: str, found: list, ids: set) -> set:
     return keep
 
 
+_PART_SYSTEM = """You check which FINDINGS back a SENTENCE, wholly or in part. \
+For each finding answer "all" if, on its own, it says what the whole sentence \
+says; "part" if it says what one distinct part of the sentence says, about the \
+same place or region, population, nutrient and outcome; "none" if it is about a \
+different region, organism or result, or only on the same topic. For "part", \
+copy the words of the sentence that it backs, exactly as they appear.
+
+Return ONLY a JSON object: {"findings": [{"id": "C1", "backs": "all"}, \
+{"id": "C2", "backs": "part", "part": "exact words from the sentence"}, \
+{"id": "C3", "backs": "none"}]}"""
+
+
+def _supporting_parts(sentence: str, found: list, ids: set) -> tuple:
+    """Like _supporting, but a finding that backs one part of the sentence is
+    kept too, with that part. Returns ({kept ids}, {id: part of the sentence});
+    a part not found verbatim in the sentence is dropped (the source is kept,
+    cited at the end). If the check fails to answer, the merge's ids stand."""
+    ordered = sorted(ids)
+    listing = "\n".join(f"C{k} {found[i][1]}" for k, i in enumerate(ordered, 1))
+    try:
+        data = _parse(_complete(_PART_SYSTEM, f"SENTENCE:\n{sentence}\n\nFINDINGS:\n{listing}",
+                                max_tokens=600))
+    except Exception:
+        return ids, {}
+    if not isinstance(data.get("findings"), list):
+        return ids, {}
+    keep, parts = set(), {}
+    for f in data["findings"]:
+        if not isinstance(f, dict):
+            continue
+        m = re.search(r"\d+", str(f.get("id", "")))
+        if not (m and 1 <= int(m.group(0)) <= len(ordered)):
+            continue
+        i, backs = ordered[int(m.group(0)) - 1], str(f.get("backs", "")).lower()
+        if backs in ("all", "part"):
+            keep.add(i)
+            part = (f.get("part") or "").strip().strip('"').rstrip(".,;")
+            if backs == "part" and part and part in sentence and part != sentence.rstrip("."):
+                parts[i] = part
+    return keep, parts
+
+
 def _batches(items: list, found: list, size: int) -> list:
     """Consecutive groups of at most `size` items, never splitting one paper's
     findings when a group can take them whole."""
@@ -236,7 +279,152 @@ def _batches(items: list, found: list, size: int) -> list:
     return groups + ([cur] if cur else [])
 
 
-def ask_many(question: str, papers: list, progress=None, max_papers: int = None) -> dict:
+def _map(question: str, chosen: list, report) -> tuple:
+    """Ask each paper on its own. Returns (found, gaps, paper infos); found is
+    [(paper n, claim text, [verified quotes])]."""
+    found, gaps, infos = [], [], []
+    for n, p in enumerate(chosen, 1):
+        report(stage="paper", paper=n, papers=len(chosen), label=p.get("label", ""))
+        info = {"n": n, "label": p.get("label", ""), "key": p.get("key", ""), "cited": 0,
+                "used": False, "abstract_only": not p["fetched"].get("has_fulltext")}
+        try:
+            r = ask(question, p["fetched"])
+            for c in r["claims"]:
+                quotes = [q["text"] for q in c["quotes"] if q["verified"]]
+                if _META_CLAIM.search(c["claim"]):
+                    gaps.append(c["claim"])
+                elif quotes:
+                    found.append((n, c["claim"], quotes))
+            gaps += r["not_addressed"]
+        except Exception as e:
+            info["error"] = f"{type(e).__name__}: {e}"
+        infos.append(info)
+    return found, gaps, infos
+
+
+def _combine_merge(question: str, chosen: list, found: list, report, parts: bool = True) -> tuple:
+    """Merge the findings into answer sentences, in parts when there are many
+    (each round merges groups of at most MERGE_BATCH, until one call can take
+    the rest), then check each sentence's findings. With `parts` (the
+    default) a finding that backs one part of the sentence stays, cited at
+    that part; without, only findings that back the whole sentence stay.
+    Returns
+    ([(sentence, {finding ids}, {id: part})], not_addressed, truncated)."""
+    truncated = False
+    items, rnd = [(text, {i}) for i, (_, text, _) in enumerate(found)], 0
+    while len(items) > MERGE_BATCH:
+        rnd += 1
+        chunks, nxt = _batches(items, found, MERGE_BATCH), []
+        for k, chunk in enumerate(chunks, 1):
+            report(stage="merge", papers=len(chosen), claims=len(found), part=k, parts=len(chunks), round=rnd)
+            res, data = _merge(question, chosen, found, chunk)
+            truncated = truncated or bool(data.get("truncated"))
+            # A part that failed carries its own findings forward.
+            nxt += [r for r in res if r[1]] or chunk
+        if len(nxt) >= len(items):        # no progress: stop shrinking
+            break
+        items = nxt
+    report(stage="merge", papers=len(chosen), claims=len(found))
+    final, data = _merge(question, chosen, found, items)
+    truncated = truncated or bool(data.get("truncated"))
+    if len(final) > MAX_ANSWER_CLAIMS:
+        # The model sometimes ignores "at most 10" and echoes the findings
+        # nearly one by one; one more merge over its own sentences fixes that.
+        report(stage="merge", papers=len(chosen), claims=len(final))
+        again, data2 = _merge(question, chosen, found, [(t, ids) for t, ids in final if ids])
+        if again and len(again) < len(final):
+            final, data = again, data2
+    checked = []
+    for k, (text, ids) in enumerate(final, 1):
+        where = {}
+        if len(ids) > 1:
+            report(stage="check", claim=k, claims=len(final))
+            ids, where = _supporting_parts(text, found, ids) if parts else (_supporting(text, found, ids), {})
+        checked.append((text, ids, where))
+    return checked, _strings(data.get("not_addressed")), truncated
+
+
+def _strings(xs) -> list:
+    return [x for x in xs or [] if isinstance(x, str) and x.strip()]
+
+
+# --- group first, then write (experimental) -------------------------------------
+# The merge above writes sentences and then points at findings, so a sentence can
+# pick up findings that are merely on its topic. Here the findings are grouped
+# first — same point about the same place, population and nutrient — and one
+# sentence is written per group, so a sentence's sources are its group by
+# construction (Slobodkin et al. 2024, "Attribute First, then Generate").
+
+_GROUP_SYSTEM = """You sort FINDINGS from several papers into groups, to answer \
+a QUESTION. Put findings in the same group only when they make the same point \
+about the same place or region, population, nutrient and outcome (they agree, \
+or one adds detail to the other). Findings about different regions, nutrients \
+or results go in different groups, even when the topic is similar. Findings \
+that contradict each other about the same thing go in separate groups. Every \
+finding goes in exactly one group; a finding unlike any other is a group of its own.
+
+Return ONLY a JSON object: {"groups": [{"ids": ["C1", "C4"], "point": "short label"}]}"""
+
+_WRITE_SYSTEM = """You write an answer to a QUESTION from GROUPS of findings. \
+For each group you use, write ONE short plain-language sentence that says only \
+what that group's findings say: you may combine them, keep their numbers, \
+places and caveats, and never add outside knowledge. Choose and order the groups \
+that answer the question best, at most 10; skip groups that don't bear on it. \
+If part of the question is answered by no group, say so in "not_addressed".
+
+Return ONLY a JSON object: {"claims": [{"group": "G1", "claim": "..."}], "not_addressed": ["..."]}"""
+
+
+def _combine_grouped(question: str, chosen: list, found: list, report) -> tuple:
+    """Group the findings, then write one sentence per group. Returns
+    ([(sentence, {finding ids})], not_addressed, truncated)."""
+    report(stage="group", papers=len(chosen), claims=len(found))
+    listing = "\n".join(f"C{i} [P{n}] {text}" for i, (n, text, _) in enumerate(found, 1))
+    try:
+        data = _parse(_complete(_GROUP_SYSTEM, f"QUESTION:\n{question}\n\nFINDINGS:\n{listing}",
+                                max_tokens=1500))
+    except Exception:
+        data = {}
+    groups, seen = [], set()
+    for g in data.get("groups") or []:
+        ids = []
+        for ref in (g.get("ids") or []) if isinstance(g, dict) else []:
+            m = re.search(r"\d+", str(ref))
+            i = int(m.group(0)) - 1 if m else -1
+            if 0 <= i < len(found) and i not in seen:
+                ids.append(i)
+                seen.add(i)
+        if ids:
+            groups.append(ids)
+    groups += [[i] for i in range(len(found)) if i not in seen]   # the model's leftovers
+    truncated = bool(data.get("truncated"))
+
+    report(stage="merge", papers=len(chosen), claims=len(found))
+    listing = "\n\n".join(f"G{k}:\n" + "\n".join(f"  [P{found[i][0]}] {found[i][1]}" for i in ids)
+                           for k, ids in enumerate(groups, 1))
+    try:
+        data = _parse(_complete(_WRITE_SYSTEM, f"QUESTION:\n{question}\n\nGROUPS:\n{listing}",
+                                max_tokens=2000))
+    except Exception:
+        data = {}
+    final, used = [], set()
+    for c in data.get("claims") or []:
+        if not isinstance(c, dict) or not (c.get("claim") or "").strip():
+            continue
+        m = re.search(r"\d+", str(c.get("group", "")))
+        k = int(m.group(0)) - 1 if m else -1
+        if 0 <= k < len(groups) and k not in used:
+            used.add(k)
+            final.append((re.sub(r"\s*\[(?:[PG]\d+[,;\s]*)+\]", "", c["claim"]).strip(), set(groups[k]), {}))
+    return final, _strings(data.get("not_addressed")), truncated or bool(data.get("truncated"))
+
+
+COMBINE = {"merge": _combine_merge, "grouped": _combine_grouped,
+           "merge_whole": lambda *a: _combine_merge(*a, parts=False)}
+
+
+def ask_many(question: str, papers: list, progress=None, max_papers: int = None,
+             method: str = "merge") -> dict:
     """Answer `question` from several papers at once.
 
     `papers` is a list of {"label", "fetched", "pages"?, "key"?}. Returns
@@ -248,7 +436,9 @@ def ask_many(question: str, papers: list, progress=None, max_papers: int = None)
     However many findings come back, no single merge call sees more than
     MERGE_BATCH of them: larger sets are merged in parts, then the parts merged.
     Each merged claim that rests on several findings is then checked against
-    them, and keeps only those that back it; a claim none back is UNGROUNDED."""
+    them, and keeps those that back it wholly or in part (each source carries
+    the `part` of the sentence it backs, or None); a claim none back is
+    UNGROUNDED. `method` picks another way to combine (see COMBINE)."""
     report = lambda **kw: progress and progress(kw)
     readable = [p for p in papers if (p.get("fetched") or {}).get("full_text")]
     out = {"question": question, "claims": [], "not_addressed": [], "papers": [],
@@ -266,59 +456,20 @@ def ask_many(question: str, papers: list, progress=None, max_papers: int = None)
                          "reason": "limit"} for i in order[max_papers:]]
     chosen = [readable[i] for i in sorted(order[:max_papers])]   # keep the user's order
 
-    # Map: each paper on its own.
-    found, gaps = [], []           # found: (paper n, claim text, [verified quotes])
-    for n, p in enumerate(chosen, 1):
-        report(stage="paper", paper=n, papers=len(chosen), label=p.get("label", ""))
-        info = {"n": n, "label": p.get("label", ""), "key": p.get("key", ""), "cited": 0,
-                "used": False, "abstract_only": not p["fetched"].get("has_fulltext")}
-        try:
-            r = ask(question, p["fetched"])
-            for c in r["claims"]:
-                quotes = [q["text"] for q in c["quotes"] if q["verified"]]
-                if _META_CLAIM.search(c["claim"]):
-                    gaps.append(c["claim"])
-                elif quotes:
-                    found.append((n, c["claim"], quotes))
-            gaps += r["not_addressed"]
-        except Exception as e:
-            info["error"] = f"{type(e).__name__}: {e}"
-        out["papers"].append(info)
+    found, gaps, out["papers"] = _map(question, chosen, report)
 
     def source(n, quote):
         return {"paper": n, "quote": quote, "verified": True, "reattributed": False,
                 "page": _library_page(quote, chosen[n - 1].get("pages"))}
 
-    # Merge the verified per-paper claims, in parts when there are many: each
-    # round merges groups of at most MERGE_BATCH, until one call can take the rest.
     merged, used = [], set()
     if len(found) > 1:
-        items, rnd = [(text, {i}) for i, (_, text, _) in enumerate(found)], 0
-        while len(items) > MERGE_BATCH:
-            rnd += 1
-            parts, nxt = _batches(items, found, MERGE_BATCH), []
-            for k, part in enumerate(parts, 1):
-                report(stage="merge", papers=len(chosen), claims=len(found), part=k, parts=len(parts), round=rnd)
-                res, data = _merge(question, chosen, found, part)
-                out["truncated"] = out.get("truncated") or bool(data.get("truncated"))
-                # A part that failed carries its own findings forward.
-                nxt += [r for r in res if r[1]] or part
-            if len(nxt) >= len(items):        # no progress: stop shrinking
-                break
-            items = nxt
-        report(stage="merge", papers=len(chosen), claims=len(found))
-        final, data = _merge(question, chosen, found, items)
-        out["truncated"] = out.get("truncated") or bool(data.get("truncated"))
-        for k, (text, ids) in enumerate(final, 1):
-            if len(ids) > 1:
-                report(stage="check", claim=k, claims=len(final))
-                ids = _supporting(text, found, ids)
-            sources = [source(found[i][0], q) for i in sorted(ids) for q in found[i][2]]
+        final, out["not_addressed"], out["truncated"] = COMBINE[method](question, chosen, found, report)
+        for text, ids, where in final:
+            sources = [dict(source(found[i][0], q), part=where.get(i)) for i in sorted(ids) for q in found[i][2]]
             used |= ids
             merged.append({"claim": text, "sources": sources, "extra": False,
                            "status": "GROUNDED" if sources else "UNGROUNDED"})
-        out["not_addressed"] = [x for x in data.get("not_addressed") or []
-                                if isinstance(x, str) and x.strip()]
         out["merged"] = bool(merged)
     else:
         out["not_addressed"] = gaps[:3]

@@ -59,13 +59,15 @@ Zotero.WorthYourReadSelfTest = {
           text: st.container.textContent.slice(0, 400) });
         const p = (n, abstract_only = false) => ({ n, label: items[n - 1].getDisplayTitle().slice(0, 40),
           key: items[n - 1].key, cited: 1, used: true, abstract_only });
-        const src = (paper, page) => ({ paper, quote: `SELFTEST quote ${paper}`, verified: true, page });
+        const src = (paper, page, part = null) => ({ paper, quote: `SELFTEST quote ${paper}`, verified: true, page, part });
         st.question = "SELFTEST notes: iron or nitrogen?";
         st.result = { question: st.question, band: "Medium", confidence: 0.6, grounded: 3, ungrounded: 0,
           merged: true, not_addressed: [],
           papers: [p(1), p(2), p(3), p(4, true), { ...p(5), used: false, cited: 0 }],
           claims: [
-            { claim: "Main claim from papers 1 and 2.", status: "GROUNDED", extra: false, sources: [src(1, 3), src(2, null)] },
+            { claim: "Iron limits one third of the ocean, specifically HNLC areas.", status: "GROUNDED", extra: false,
+              sources: [src(1, 3, "Iron limits one third of the ocean"), src(2, null, "specifically HNLC areas"),
+                src(1, 4, "specifically HNLC areas")] },
             { claim: "Main claim from paper 4 (abstract).", status: "GROUNDED", extra: false, sources: [src(4, null), src(1, 5)] },
             { claim: "Further finding from paper 3.", status: "GROUNDED", extra: true, sources: [src(3, 2)] }],
           skipped: [], left_out: [
@@ -80,6 +82,12 @@ Zotero.WorthYourReadSelfTest = {
           select: (html.match(/zotero:\/\/select\//g) || []).length,
           openPdf: (html.match(/zotero:\/\/open-pdf\//g) || []).length,
           highlights: (html.match(/background-color/g) || []).length,
+          // the first paper's citation sits before ", specifically", the second's after it
+          partCitation: html.indexOf('class="citation"', html.indexOf("<p>Iron limits")) < html.indexOf(", specifically HNLC")
+            && html.indexOf('class="citation"', html.indexOf(", specifically HNLC")) < html.indexOf("</p>", html.indexOf("<p>Iron limits")),
+          // paper 1 backs both parts: cited twice in the sentence
+          firstPaperCitedTwice: (html.match(/<p>Iron limits[\s\S]*?<\/p>/)?.[0].match(/class="citation"/g) || []).length === 3,
+          firstClaim: html.match(/<p>Iron limits[\s\S]*?<\/p>/)?.[0].replace(/<span class="citation"[^>]*>([\s\S]*?)<\/span>/g, "[$1]"),
           online: (html.match(/>Online</g) || []).length, onlineQuotes: (html.match(/>online</g) || []).length,
           onlineSample: html.match(/href="(https?:[^"]+)">Online/)?.[1],
           html: html.slice(html.indexOf("<h2>References")) });

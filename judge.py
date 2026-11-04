@@ -604,7 +604,7 @@ def _ollama_chat(system: str, user: str, json_mode: bool = True,
         "model": config.OLLAMA_MODEL,
         "stream": False,
         "think": False,
-        "options": {"temperature": 0,
+        "options": {"temperature": 0, "seed": 0,     # the same input gives the same answer
                     "num_ctx": config.OLLAMA_NUM_CTX,
                     "num_predict": num_predict or config.OLLAMA_NUM_PREDICT},
         "messages": [{"role": "system", "content": system},

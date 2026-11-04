@@ -217,6 +217,28 @@ function leftOutLines(r) {
     .map(p => p.reason ? `${p.label} (${LEFT_OUT[p.reason] || p.reason})` : p.label);
 }
 
+/** A claim as HTML with each paper's citation placed right after each part of
+ * the sentence it backs (`source.part`; a paper backing two parts is cited at
+ * both), or at the end when it backs the whole sentence; `cite(n)` gives a
+ * paper's citation HTML. */
+function citedClaimHTML(claim, sources, cite) {
+  const esc = Zotero.Utilities.htmlSpecialChars;
+  const end = claim.replace(/[\s.]+$/, "").length;      // before the final full stop
+  const at = new Map();                                // offset -> papers cited there
+  const add = (pos, n) => { if (!(at.get(pos) || []).includes(n)) at.set(pos, [...(at.get(pos) || []), n]); };
+  for (const n of new Set(sources.map(s => s.paper))) {
+    const placed = sources.filter(s => s.paper === n && s.part && claim.includes(s.part));
+    for (const s of placed) add(Math.min(claim.indexOf(s.part) + s.part.length, end), n);
+    if (!placed.length) add(end, n);
+  }
+  let html = "", last = 0;
+  for (const pos of [...at.keys()].sort((a, b) => a - b)) {
+    html += esc(claim.slice(last, pos)) + " " + at.get(pos).map(cite).join(" ");
+    last = pos;
+  }
+  return html + esc(claim.slice(last));
+}
+
 /** The zotero:// path of an item's library: "library", or "groups/<id>". */
 function libraryPath(item) {
   return item.library.libraryType === "group"
@@ -978,7 +1000,7 @@ Zotero.WorthYourRead = {
           st.progress?.stage === "paper" ? `Reading paper ${st.progress.paper} of ${st.progress.papers}: ${st.progress.label}…`
             : st.progress?.stage === "merge" ? `Merging ${st.progress.claims} findings from ${st.progress.papers} papers`
               + (st.progress.parts ? ` (part ${st.progress.part} of ${st.progress.parts})…` : "…")
-              : st.progress?.stage === "check" ? `Checking which findings back answer claim ${st.progress.claim} of ${st.progress.claims}…`
+              : st.progress?.stage === "check" ? `Checking which findings back each part of answer claim ${st.progress.claim} of ${st.progress.claims}…`
               : "Starting…") : null),
       st.error ? h(doc, "div", { style: "color:#b3261e" }, st.error) : null);
     if (st.result) root.append(this.renderAskManyResult(doc, st));
@@ -999,6 +1021,7 @@ Zotero.WorthYourRead = {
         } }, `[${s.paper}] ${p ? p.label : "?"}${s.page ? `, p. ${s.page}` : ""}`);
       return h(doc, "blockquote", { style: "margin:4px 0 4px 12px;color:var(--fill-secondary)" },
         link, s.reattributed ? " (the model cited a different paper; moved to the one that has it)" : "",
+        s.part ? h(doc, "span", { style: "font-style:italic" }, ` — backs “${s.part}”`) : null,
         h(doc, "div", {}, `“${s.quote}”`));
     };
     const grounded = r.claims.filter(c => c.status === "GROUNDED");
@@ -1084,8 +1107,7 @@ Zotero.WorthYourRead = {
     for (const c of ordered) {
       if (c.extra && c === ordered.find(x => x.extra)) parts.push("<h2>Further findings from individual papers</h2>");
       const ok = c.sources.filter(s => s.verified);
-      const papers = [...new Set(ok.map(s => s.paper))];
-      parts.push(`<p>${esc(c.claim)} ${papers.map(n => cite(n)).join(" ")}</p>`);
+      parts.push(`<p>${citedClaimHTML(c.claim, ok, n => cite(n))}</p>`);
       for (const s of ok) {
         const item = itemOf(s.paper);
         const pdf = item && s.page && pdfURL(item, s.page), web = item && !pdf && onlineURL(item);
