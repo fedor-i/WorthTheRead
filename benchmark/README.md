@@ -77,3 +77,9 @@ keep/cut decisions (`{"method", "keep": {id: bool}}`): precision, recall
 (split into full and partial support), sentences left citing a wrong source,
 sentences left with no support. No model runs in the scorer.
 `multi_source_baseline.json` is the current per-claim support check.
+
+## Comparing with other tools
+`compare/` runs the same 4 questions over the same paper texts in Worth Your
+Read, PaperQA2 (same local model), and tools used by hand (NotebookLM,
+ReadCube), then scores every tool's citations with one judge (Claude on
+Bedrock, checked first against the hand labels). See `compare/README.md`.

@@ -1,0 +1,298 @@
+[
+ {
+  "id": "iron-limits",
+  "question": "Is primary production in the ocean limited by iron or by nitrogen, and where does each limitation apply?",
+  "papers": [
+   {
+    "label": "Moore et al. 2013 — Processes and patterns of oceanic nutrient limitation",
+    "key": "XD7KM28D"
+   },
+   {
+    "label": "Boyd et al. 2007 — Mesoscale Iron Enrichment Experiments 1993-2005: Synthesis and Future",
+    "key": "L9MTFHZC"
+   },
+   {
+    "label": "Ward et al. 2013 — Iron, phosphorus, and nitrogen supply ratios define the biogeography o",
+    "key": "TTD5CJZX"
+   },
+   {
+    "label": "Bonnet et al. 2008 — Nutrient limitation of primary productivity in the Southeast Pacific (",
+    "key": "R9EZYGQN"
+   },
+   {
+    "label": "Parekh et al. 2004 — Modeling the global ocean iron cycle",
+    "key": "UK5AJXPW"
+   },
+   {
+    "label": "Okin et al. 2011 — Impacts of atmospheric nutrient deposition on marine productivity: Rol",
+    "key": "N7X4IPZK"
+   },
+   {
+    "label": "Fung et al. 2000 — Iron supply and demand in the upper ocean",
+    "key": "IGH2MAYW"
+   },
+   {
+    "label": "Aumont et al. 2003 — An ecosystem model of the global ocean including Fe, Si, P colimitatio",
+    "key": "B4977RBK"
+   },
+   {
+    "label": "Ustick et al. 2021 — Metagenomic analysis reveals global-scale patterns of ocean nutrient l",
+    "key": "QWBTFS4S"
+   },
+   {
+    "label": "Saito et al. 2014 — Multiple nutrient stresses at intersecting Pacific Ocean biomes detect",
+    "key": "LN22J374"
+   },
+   {
+    "label": "Behrenfeld et al. 1996 — Confirmation of iron limitation of phytoplankton photosynthesis in the",
+    "key": "SKZJI6FV"
+   },
+   {
+    "label": "De Baar et al. 2005 — Synthesis of iron fertilization experiments: From the Iron Age in the",
+    "key": "GULG6GR8"
+   },
+   {
+    "label": "Nishioka and Obata 2017 — Dissolved iron distribution in the western and central subarctic Pacif",
+    "key": "EQXDWB59"
+   },
+   {
+    "label": "Martin et al. 1994 — Testing the iron hypothesis in ecosystems of the equatorial Pacific Oc",
+    "key": "NDCAZK5H"
+   },
+   {
+    "label": "Behrenfeld and Kolber 1999 — Widespread Iron Limitation of Phytoplankton in the South Pacific Ocean",
+    "key": "MCR5KJNC"
+   },
+   {
+    "label": "Tsuda et al. 2003 — A Mesoscale Iron Enrichment in the Western Subarctic Pacific Induces a",
+    "key": "F6FDHPPZ"
+   },
+   {
+    "label": "Coale et al. 2004 — Southern Ocean Iron Enrichment Experiment: Carbon Cycling in High- and",
+    "key": "IAQI6R96"
+   },
+   {
+    "label": "Kolber et al. 1994 — Iron limitation of phytoplankton photosynthesis in the equatorial Paci",
+    "key": "97CA5RZH"
+   },
+   {
+    "label": "Bopp et al. 2003 — Dust impact on marine biota and atmospheric CO<sub>2</sub> during glac",
+    "key": "IAETENUH"
+   }
+  ]
+ },
+ {
+  "id": "iron-biomass",
+  "question": "How much did iron additions increase phytoplankton biomass or productivity in the iron-enrichment experiments?",
+  "papers": [
+   {
+    "label": "Moore et al. 2013 — Processes and patterns of oceanic nutrient limitation",
+    "key": "XD7KM28D"
+   },
+   {
+    "label": "Boyd et al. 2007 — Mesoscale Iron Enrichment Experiments 1993-2005: Synthesis and Future",
+    "key": "L9MTFHZC"
+   },
+   {
+    "label": "Ward et al. 2013 — Iron, phosphorus, and nitrogen supply ratios define the biogeography o",
+    "key": "TTD5CJZX"
+   },
+   {
+    "label": "Bonnet et al. 2008 — Nutrient limitation of primary productivity in the Southeast Pacific (",
+    "key": "R9EZYGQN"
+   },
+   {
+    "label": "Parekh et al. 2004 — Modeling the global ocean iron cycle",
+    "key": "UK5AJXPW"
+   },
+   {
+    "label": "Okin et al. 2011 — Impacts of atmospheric nutrient deposition on marine productivity: Rol",
+    "key": "N7X4IPZK"
+   },
+   {
+    "label": "Fung et al. 2000 — Iron supply and demand in the upper ocean",
+    "key": "IGH2MAYW"
+   },
+   {
+    "label": "Aumont et al. 2003 — An ecosystem model of the global ocean including Fe, Si, P colimitatio",
+    "key": "B4977RBK"
+   },
+   {
+    "label": "Ustick et al. 2021 — Metagenomic analysis reveals global-scale patterns of ocean nutrient l",
+    "key": "QWBTFS4S"
+   },
+   {
+    "label": "Saito et al. 2014 — Multiple nutrient stresses at intersecting Pacific Ocean biomes detect",
+    "key": "LN22J374"
+   },
+   {
+    "label": "Behrenfeld et al. 1996 — Confirmation of iron limitation of phytoplankton photosynthesis in the",
+    "key": "SKZJI6FV"
+   },
+   {
+    "label": "De Baar et al. 2005 — Synthesis of iron fertilization experiments: From the Iron Age in the",
+    "key": "GULG6GR8"
+   },
+   {
+    "label": "Nishioka and Obata 2017 — Dissolved iron distribution in the western and central subarctic Pacif",
+    "key": "EQXDWB59"
+   },
+   {
+    "label": "Martin et al. 1994 — Testing the iron hypothesis in ecosystems of the equatorial Pacific Oc",
+    "key": "NDCAZK5H"
+   },
+   {
+    "label": "Behrenfeld and Kolber 1999 — Widespread Iron Limitation of Phytoplankton in the South Pacific Ocean",
+    "key": "MCR5KJNC"
+   },
+   {
+    "label": "Tsuda et al. 2003 — A Mesoscale Iron Enrichment in the Western Subarctic Pacific Induces a",
+    "key": "F6FDHPPZ"
+   },
+   {
+    "label": "Coale et al. 2004 — Southern Ocean Iron Enrichment Experiment: Carbon Cycling in High- and",
+    "key": "IAQI6R96"
+   },
+   {
+    "label": "Kolber et al. 1994 — Iron limitation of phytoplankton photosynthesis in the equatorial Paci",
+    "key": "97CA5RZH"
+   },
+   {
+    "label": "Bopp et al. 2003 — Dust impact on marine biota and atmospheric CO<sub>2</sub> during glac",
+    "key": "IAETENUH"
+   }
+  ]
+ },
+ {
+  "id": "false-findings",
+  "question": "Why might most published research findings be false, and what has been proposed in response?",
+  "papers": [
+   {
+    "label": "Ioannidis 2005 — Why Most Published Research Findings Are False",
+    "key": "CEUPQHKJ"
+   },
+   {
+    "label": "Wacholder et al. 2004 — Assessing the Probability That a Positive Report is False: An Approach",
+    "key": "EAUCCQ6M"
+   },
+   {
+    "label": "Djulbegovic and Hozo 2007 — When Should Potentially False Research Findings Be Considered Acceptab",
+    "key": "J93PJPZL"
+   },
+   {
+    "label": "Goodman and Greenland 2007 — Why Most Published Research Findings Are False: Problems in the Analys",
+    "key": "YU69WJ6N"
+   },
+   {
+    "label": "Lobentanzer 2020 — Why most pre-published research findings are false.",
+    "key": "VQKUM5KM"
+   }
+  ]
+ },
+ {
+  "id": "metformin",
+  "question": "Does metformin reduce mortality or extend lifespan in humans?",
+  "papers": [
+   {
+    "label": "Metformin reduces all-cause mortality and diseases of ageing (2017)",
+    "key": "10.1016/j.arr.2017.08.003"
+   },
+   {
+    "label": "Risk of cardiovascular disease and all cause mortality among (2009)",
+    "key": "10.1136/bmj.b4731"
+   },
+   {
+    "label": "Decreased Mortality Associated With the Use of Metformin Com (2002)",
+    "key": "10.2337/diacare.25.12.2244"
+   },
+   {
+    "label": "Effect of metformin on cardiovascular events and mortality:  (2010)",
+    "key": "10.1111/j.1463-1326.2010.01349.x"
+   },
+   {
+    "label": "Metformin Use and Mortality Among Patients With Diabetes and (2010)",
+    "key": "10.1001/archinternmed.2010.409"
+   },
+   {
+    "label": "Comparative Effectiveness of Sulfonylurea and Metformin Mono (2012)",
+    "key": "10.7326/0003-4819-157-9-201211060-00003"
+   },
+   {
+    "label": "Risk of mortality and adverse cardiovascular outcomes in typ (2006)",
+    "key": "10.1007/s00125-006-0176-9"
+   },
+   {
+    "label": "Reappraisal of Metformin Efficacy in the Treatment of Type 2 (2012)",
+    "key": "10.1371/journal.pmed.1001204"
+   },
+   {
+    "label": "Cancer outcomes and all-cause mortality in adults allocated  (2012)",
+    "key": "10.1007/s00125-012-2653-7"
+   },
+   {
+    "label": "Increased mortality in Type II diabetic patients using sulph (2000)",
+    "key": "10.1007/s001250051343"
+   },
+   {
+    "label": "Metformin as a geroprotector: experimental and clinical evid (2018)",
+    "key": "10.1007/s10522-018-9773-5"
+   },
+   {
+    "label": "Cancer mortality reduction and metformin: a retrospective co (2011)",
+    "key": "10.1111/j.1463-1326.2011.01480.x"
+   },
+   {
+    "label": "Metformin Improves Overall Survival of Colorectal Cancer Pat (2017)",
+    "key": "10.1155/2017/5063239"
+   },
+   {
+    "label": "Metformin Is Associated With Slightly Reduced Risk of Colore (2016)",
+    "key": "10.1097/md.0000000000002749"
+   },
+   {
+    "label": "Impact of Oral Antihyperglycemic Therapy on All-Cause Mortal (2007)",
+    "key": "10.2337/dc06-2272"
+   },
+   {
+    "label": "Taming expectations of metformin as a treatment to extend he (2019)",
+    "key": "10.1007/s11357-019-00057-3"
+   },
+   {
+    "label": "Combination therapy with sulfonylureas and metformin and the (2010)",
+    "key": "10.1002/pds.1834"
+   },
+   {
+    "label": "Use of Metformin and Cardiovascular Effects of New Classes o (2020)",
+    "key": "10.2337/dc20-2080"
+   },
+   {
+    "label": "The mechanisms of action of metformin (2017)",
+    "key": "10.1007/s00125-017-4342-z"
+   },
+   {
+    "label": "The Kinase LKB1 Mediates Glucose Homeostasis in Liver and Th (2005)",
+    "key": "10.1126/science.1120781"
+   },
+   {
+    "label": "Metformin improves healthspan and lifespan in mice (2013)",
+    "key": "10.1038/ncomms3192"
+   },
+   {
+    "label": "Dimethylbiguanide Inhibits Cell Respiration via an Indirect  (2000)",
+    "key": "10.1074/jbc.275.1.223"
+   },
+   {
+    "label": "AMP-Activated Protein Kinase in Metabolic Control and Insuli (2007)",
+    "key": "10.1161/01.res.0000256090.42690.05"
+   },
+   {
+    "label": "Metformin Retards Aging in C. elegans by Altering Microbial  (2013)",
+    "key": "10.1016/j.cell.2013.02.035"
+   },
+   {
+    "label": "Systemic Treatment with the Antidiabetic Drug Metformin Sele (2007)",
+    "key": "10.1158/0008-5472.can-06-4447"
+   }
+  ]
+ }
+]

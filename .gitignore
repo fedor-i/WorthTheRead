@@ -22,3 +22,6 @@ benchmark/adapters/scifact_data/
 
 # Zotero plugin build output
 zotero-plugin/build/
+.venv-paperqa/
+benchmark/compare/papers/
+benchmark/compare/answers/
