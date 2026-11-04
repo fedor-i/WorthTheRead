@@ -107,3 +107,28 @@ Where the remaining errors are now — the merged sentence, not its sources:
   shorten them. The cause is not yet known.
 - **Disagreement isn't brought out:** Goodman & Greenland's critique of "most
   findings are false" only appears as a list of causes.
+
+## E. Sentence check: does a merged sentence say only what its findings say? (2026-11-04)
+`faithful_gold.jsonl`: the 56 merge + part-check sentences from A–D, each with
+its kept findings, labelled faithful or not by hand. 4 are not:
+false-s02 ("greater preselection"; the finding says *lesser*), metf-s08 (one
+meta-analysis split into "another study" twice), metf-s09 ("2ly%"), metf-s13
+(the all-trials RR 0.94 given as a placebo-trials figure).
+
+| check | caught | false alarms | cost |
+|---|---|---|---|
+| number guard (`_unsourced_numbers`) | 1/4 (s09) | 0/52 | none |
+| model check (`_unfaithful`, `experiment.py faithful`) | 2/4 (false-s02, metf-s09) | 0/52 | 692 s, ~12 s per sentence |
+| "another study" rule (`_more_studies_than_papers`) | 1/4 (metf-s08) | 0/52; 0 over all 147 saved sentences | none |
+| all three | 3/4 | 0/52 | |
+
+- The model check is the only one that sees a reversed direction.
+- It misses wrong scope (metf-s13): the sentence's opening "In trials
+  comparing metformin to placebo" scopes a number the findings give for all
+  trials, and the model doesn't connect the two.
+- It also misses "another study" (metf-s08) even though each finding names its
+  paper; the rule catches it without a model. "In a second study" (a method,
+  in false-s09) is not counted.
+- Both now run in `ask_many` on every merged claim (`problems`), shown in red
+  in the Ask tab and the note. A figure the number guard already flags is not
+  repeated.

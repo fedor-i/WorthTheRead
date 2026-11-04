@@ -69,7 +69,9 @@ Zotero.WorthYourReadSelfTest = {
               sources: [src(1, 3, "Iron limits one third of the ocean"), src(2, null, "specifically HNLC areas"),
                 src(1, 4, "specifically HNLC areas")] },
             { claim: "Main claim from paper 4 (abstract), up 2ly%.", status: "GROUNDED", extra: false, sources: [src(4, null), src(1, 5)],
-              unsourced_numbers: ["2"] },
+              unsourced_numbers: ["2"],
+              problems: [{ words: "another study found", why: "it reads as 2 studies, but its findings come from 1 paper" },
+                { words: "", why: "the finding says lesser, not greater" }] },
             { claim: "Further finding from paper 3.", status: "GROUNDED", extra: true, sources: [src(3, 2)] }],
           skipped: [], left_out: [
             { label: items[5].getDisplayTitle(), key: items[5].key, reason: "limit" },
@@ -77,6 +79,10 @@ Zotero.WorthYourReadSelfTest = {
             { label: "Unknown paper", key: "", reason: "load_failed" }] };
         WYR.renderAskMany(st);
         log("resultText", st.container.textContent.slice(-600));
+        const tabText = st.container.textContent;
+        log("tabWarnings", { numbers: tabText.includes("Check this: 2 is not in any of its sources"),
+          problemWords: tabText.includes("Check this: “another study found” — it reads as 2 studies"),
+          problemNoWords: tabText.includes("Check this: the finding says lesser, not greater") });
         const note = await WYR.saveAskManyNote(st);
         const html = note.getNote();
         log("noteHTML", { firstPaperHasPDF: !!att0?.attachmentReaderType,
@@ -87,6 +93,8 @@ Zotero.WorthYourReadSelfTest = {
           partCitation: html.indexOf('class="citation"', html.indexOf("<p>Iron limits")) < html.indexOf(", specifically HNLC")
             && html.indexOf('class="citation"', html.indexOf(", specifically HNLC")) < html.indexOf("</p>", html.indexOf("<p>Iron limits")),
           numbersFlag: html.includes("Check: 2 is not in its sources"),
+          problemFlags: html.includes("Check: “another study found” — it reads as 2 studies")
+            && html.includes("Check: the finding says lesser, not greater"),
           // paper 1 backs both parts: cited twice in the sentence
           firstPaperCitedTwice: (html.match(/<p>Iron limits[\s\S]*?<\/p>/)?.[0].match(/class="citation"/g) || []).length === 3,
           firstClaim: html.match(/<p>Iron limits[\s\S]*?<\/p>/)?.[0].replace(/<span class="citation"[^>]*>([\s\S]*?)<\/span>/g, "[$1]"),

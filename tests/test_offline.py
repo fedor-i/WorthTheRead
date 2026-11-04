@@ -163,7 +163,7 @@ def test_ask_many_asks_each_paper_then_merges_by_claim_id(monkeypatch):
     # the fabricated per-paper quote ("doubled lifespan") never reaches the answer
     assert "doubled" not in json.dumps(r["claims"])
     assert r["merged"] and r["skipped"] == ["Empty"] and all(p["used"] for p in r["papers"])
-    assert [p["stage"] for p in seen] == ["paper", "paper", "merge", "check"] and r["not_addressed"] == ["cost"]
+    assert [p["stage"] for p in seen] == ["paper", "paper", "merge", "check", "wording"] and r["not_addressed"] == ["cost"]
     assert 0 < r["confidence"] <= 0.7
 
 
@@ -531,3 +531,53 @@ def test_failed_requests_mark_search_incomplete(fake_graph, monkeypatch):
     monkeypatch.setattr(research, "fetch_works", flaky)
     r = research.snowball(_TOPIC, screen=fake_graph)
     assert r["stopped"] == "incomplete"
+
+
+def test_unfaithful_keeps_problems_and_drops_words_not_in_the_sentence(monkeypatch):
+    seen = {}
+    def complete(system, user, max_tokens=1500):
+        seen["user"] = user
+        return json.dumps({"problems": [
+            {"words": "in placebo trials, RR 0.94", "why": "0.94 is across all trials"},
+            {"words": "another study", "why": "same paper"},
+            {"words": "made up words", "why": "not in the sentence"},
+            {"words": "x", "why": ""}]})
+    monkeypatch.setattr(answer, "_complete", complete)
+    found = [(1, "RR 0.94 across all trials", []), (1, "RR 0.91 in placebo trials", [])]
+    chosen = [{"label": "Smith 2020 — Metformin trials"}]
+    probs = answer._unfaithful("In placebo trials, RR 0.94 and 0.91; another study agreed.", found, {0, 1}, chosen)
+    assert probs == [{"words": "", "why": "0.94 is across all trials"},
+                     {"words": "another study", "why": "same paper"},
+                     {"words": "", "why": "not in the sentence"}]
+    assert "C1 (Smith 2020) RR 0.94" in seen["user"] and "C2 (Smith 2020)" in seen["user"]
+    monkeypatch.setattr(answer, "_complete", lambda *a, **k: "not json")
+    assert answer._unfaithful("x", found, {0}, chosen) == []
+
+
+def test_a_sentence_naming_more_studies_than_it_cites_is_flagged():
+    s = "One meta-analysis found a benefit; another study found no effect, and another study found harm."
+    assert answer._more_studies_than_papers(s, 1)[0]["words"] == "another study found"
+    assert answer._more_studies_than_papers(s, 3) == []
+    assert answer._more_studies_than_papers("Requiring replication in a second study reduces false positives.", 1) == []
+
+
+def test_ask_many_flags_merged_sentences_that_say_more_than_their_findings(monkeypatch):
+    merge = json.dumps({"claims": [
+        {"claim": "Mortality fell by 21%; another study found longer life.", "from": ["C1", "C2"]}]})
+    fake = _fake_model(merge)
+    def complete(system, user, max_tokens=1500):
+        if system == answer._FAITHFUL_SYSTEM:
+            return json.dumps({"problems": [{"words": "by 21%", "why": "the finding says 12%"},
+                                            {"words": "longer life", "why": "the finding says users lived longer"}]})
+        if system == answer._PART_SYSTEM:
+            return json.dumps({"findings": [{"id": "C1", "backs": "part"}, {"id": "C2", "backs": "part"}]})
+        return fake(system, user, max_tokens)
+    monkeypatch.setattr(answer, "_complete", complete)
+    seen = []
+    r = answer.ask_many("Does metformin extend life?", [_paper("Trial A", _A_TEXT), _paper("Cohort B", _B_TEXT)],
+                        progress=seen.append)
+    first = r["claims"][0]
+    assert first["unsourced_numbers"] == ["21"]
+    # the number guard already flags 21: no second warning for it; two papers, so "another study" is fine
+    assert first["problems"] == [{"words": "longer life", "why": "the finding says users lived longer"}]
+    assert "wording" in [p["stage"] for p in seen]

@@ -48,8 +48,14 @@ the HNLC areas (Okin 2011)". Findings that back no part of it stay in the note
 as further findings. If the model returns more than 10 answer claims, they are
 merged once more. A merged claim containing a number that appears in none of its
 findings (the merge once turned "24%" into "2ly%") is flagged in red, in the
-tab and in the note.
-About 20 seconds per paper on gemma4:26b. **Save as note with
+tab and in the note. Each merged claim is then checked against its findings
+once more, and flagged in red where it says something they don't: a reversed
+direction ("greater" for "lesser"), a changed figure, a result moved to another
+group, or "another study" when all its findings come from one paper. On the
+test set this caught 3 of 4 such sentences with no false alarms; a result
+moved to another group can still slip through.
+About 20 seconds per paper on gemma4:26b, plus about 12 seconds per answer claim
+for the last check. **Save as note with
 citations** stores it as a note with live Zotero citations (page locators
 included), which Zotero's Word/LibreOffice plugin can insert with *Add Note*.
 Each quote with a page links straight to that page of the PDF (a paper read

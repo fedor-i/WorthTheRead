@@ -279,6 +279,65 @@ def _unsourced_numbers(sentence: str, texts: list) -> list:
     return sorted(_numbers(sentence) - have, key=sentence.find)
 
 
+_ANOTHER_STUDY = re.compile(
+    r"\b(?:another|a second|a separate|a different|a further|other)\s+"
+    r"(?:study|paper|trial|meta-analysis|review|analysis|cohort|report)s?\s+(?:also\s+)?"
+    r"(?:found|finds|showed|shows|reported|reports|observed|suggested|suggests|indicated|"
+    r"indicates|concluded|demonstrated)\b", re.I)
+
+
+def _more_studies_than_papers(sentence: str, papers: int) -> list:
+    """The merge likes "one meta-analysis found …; another study found …" even
+    when every finding is from one paper, and the model check misses it. A
+    sentence naming more studies than it cites papers is flagged; "in a second
+    study" (a method, not a source) does not count."""
+    said = _ANOTHER_STUDY.findall(sentence)
+    if not said or len(said) + 1 <= papers:
+        return []
+    return [{"words": said[0], "why": f"it reads as {len(said) + 1} studies, but its findings come from "
+                                      f"{papers} paper{'s' if papers != 1 else ''}"}]
+
+
+_FAITHFUL_SYSTEM = """You check a SENTENCE that was written from FINDINGS; each \
+finding names the paper it comes from. Rewording, shortening and combining \
+findings is fine. Report only where the sentence says something its findings \
+do not:
+- a number that differs from the findings;
+- a result given for a different group, subgroup, comparison or place than \
+the finding gives it for;
+- a reversed direction (more/less, greater/lesser, increase/decrease);
+- stronger or weaker certainty (significant vs not significant, shows vs \
+suggests);
+- results from ONE paper described as different studies, or results from \
+different papers described as one study.
+For each problem copy the words of the sentence that are wrong, exactly as \
+they appear, and say briefly why.
+
+Return ONLY a JSON object: {"problems": [{"words": "...", "why": "..."}]} — \
+an empty list if the sentence says only what its findings say."""
+
+
+def _unfaithful(sentence: str, found: list, ids: set, chosen: list) -> list:
+    """Where `sentence` says more than, or other than, its findings: the
+    merge can move a figure to the wrong subgroup, reverse a direction, or
+    turn one paper into "another study", and the sources still look right.
+    Returns [{"words", "why"}] ("words" is "" when the model's words are not
+    in the sentence); [] if it is faithful or the check fails to answer."""
+    label = lambda n: chosen[n - 1].get("label", f"paper {n}").split(" — ")[0]
+    listing = "\n".join(f"C{k} ({label(found[i][0])}) {found[i][1]}" for k, i in enumerate(sorted(ids), 1))
+    try:
+        data = _parse(_complete(_FAITHFUL_SYSTEM, f"SENTENCE:\n{sentence}\n\nFINDINGS:\n{listing}",
+                                max_tokens=400))
+    except Exception:
+        return []
+    out = []
+    for p in data.get("problems") or []:
+        if isinstance(p, dict) and str(p.get("why") or "").strip():
+            words = str(p.get("words") or "").strip().strip('"')
+            out.append({"words": words if words and words in sentence else "", "why": str(p["why"]).strip()})
+    return out
+
+
 def _batches(items: list, found: list, size: int) -> list:
     """Consecutive groups of at most `size` items, never splitting one paper's
     findings when a group can take them whole."""
@@ -503,13 +562,20 @@ def ask_many(question: str, papers: list, progress=None, max_papers: int = None,
     merged, used = [], set()
     if len(found) > 1:
         final, out["not_addressed"], out["truncated"] = COMBINE[method](question, chosen, found, report)
-        for text, ids, where in final:
+        for k, (text, ids, where) in enumerate(final, 1):
             sources = [dict(source(found[i][0], q), part=where.get(i)) for i in sorted(ids) for q in found[i][2]]
             used |= ids
+            numbers = _unsourced_numbers(text, [t for i in ids for t in [found[i][1], *found[i][2]]])
+            problems = []
+            if ids:
+                report(stage="wording", claim=k, claims=len(final))
+                problems = _more_studies_than_papers(text, len({found[i][0] for i in ids}))
+                # A figure the number guard already flags needs no second warning.
+                problems += [p for p in _unfaithful(text, found, ids, chosen)
+                             if not (p["words"] and _numbers(p["words"]) & set(numbers))]
             merged.append({"claim": text, "sources": sources, "extra": False,
                            "status": "GROUNDED" if sources else "UNGROUNDED",
-                           "unsourced_numbers": _unsourced_numbers(
-                               text, [t for i in ids for t in [found[i][1], *found[i][2]]])})
+                           "unsourced_numbers": numbers, "problems": problems})
         out["merged"] = bool(merged)
     else:
         out["not_addressed"] = gaps[:3]

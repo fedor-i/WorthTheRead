@@ -974,7 +974,7 @@ Zotero.WorthYourRead = {
     q.addEventListener("input", () => { st.question = q.value; });
     const limit = h(doc, "input", { type: "number", min: "1", max: String(st.items.length),
       value: String(st.maxPapers), dataset: { wyrLimit: "" }, style: "width:4em" });
-    const minutes = () => `about ${Math.max(1, Math.round(st.maxPapers * 20 / 60))} min`;
+    const minutes = () => `about ${Math.max(1, Math.round((st.maxPapers * 20 + 120) / 60))} min`;
     const estimate = h(doc, "span", { style: "color:var(--fill-secondary)" }, minutes());
     limit.addEventListener("input", () => {
       const n = Math.round(Number(limit.value));
@@ -1001,6 +1001,7 @@ Zotero.WorthYourRead = {
             : st.progress?.stage === "merge" ? `Merging ${st.progress.claims} findings from ${st.progress.papers} papers`
               + (st.progress.parts ? ` (part ${st.progress.part} of ${st.progress.parts})…` : "…")
               : st.progress?.stage === "check" ? `Checking which findings back each part of answer claim ${st.progress.claim} of ${st.progress.claims}…`
+              : st.progress?.stage === "wording" ? `Checking that answer claim ${st.progress.claim} of ${st.progress.claims} says only what its findings say…`
               : "Starting…") : null),
       st.error ? h(doc, "div", { style: "color:#b3261e" }, st.error) : null);
     if (st.result) root.append(this.renderAskManyResult(doc, st));
@@ -1030,8 +1031,10 @@ Zotero.WorthYourRead = {
     const unused = r.papers.filter(p => !p.used);
     const numbersWarning = (c) => c.unsourced_numbers?.length ? h(doc, "div", { style: "color:#b3261e" },
       `Check this: ${c.unsourced_numbers.join(", ")} is not in any of its sources — the merge may have changed a figure.`) : null;
+    const problemsWarning = (c) => (c.problems || []).map(p => h(doc, "div", { style: "color:#b3261e" },
+      `Check this: ${p.words ? `“${p.words}” — ` : ""}${p.why}`));
     const claimList = (list) => h(doc, "ol", { style: "padding-left:20px" }, list.map(c =>
-      h(doc, "li", { style: "margin-bottom:8px" }, c.claim, numbersWarning(c),
+      h(doc, "li", { style: "margin-bottom:8px" }, c.claim, numbersWarning(c), ...problemsWarning(c),
         c.sources.filter(s => s.verified).map(sourceLine))));
     if (!r.claims.length) {
       return h(doc, "div", { style: "color:#b3261e" },
@@ -1112,7 +1115,9 @@ Zotero.WorthYourRead = {
       const ok = c.sources.filter(s => s.verified);
       const warn = c.unsourced_numbers?.length
         ? ` <span style="background-color: #ff666680">Check: ${esc(c.unsourced_numbers.join(", "))} is not in its sources</span>` : "";
-      parts.push(`<p>${citedClaimHTML(c.claim, ok, n => cite(n))}${warn}</p>`);
+      const problems = (c.problems || []).map(p => ` <span style="background-color: #ff666680">Check: `
+        + `${p.words ? `“${esc(p.words)}” — ` : ""}${esc(p.why)}</span>`).join("");
+      parts.push(`<p>${citedClaimHTML(c.claim, ok, n => cite(n))}${warn}${problems}</p>`);
       for (const s of ok) {
         const item = itemOf(s.paper);
         const pdf = item && s.page && pdfURL(item, s.page), web = item && !pdf && onlineURL(item);

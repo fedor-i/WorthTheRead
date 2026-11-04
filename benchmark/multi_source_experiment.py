@@ -6,12 +6,16 @@ Runs the configured model (set WYR_USE_OLLAMA=1 for the local one).
            check (_supporting) and the part check (_supporting_parts). Writes
            predictions and prints scores. One short call per sentence each.
 
+  faithful On faithful_gold.jsonl (merged sentences, labelled faithful or
+           not): run the sentence check (_unfaithful) and print what it flags.
+
   run      On a Zotero collection: ask every paper once (findings cached in
            OUT/findings.json), then combine the same findings with each method
            in answer.COMBINE and write OUT/<method>.json — sentence, sources —
            for labelling.
 
     python benchmark/multi_source_experiment.py checks OUT
+    python benchmark/multi_source_experiment.py faithful OUT
     python benchmark/multi_source_experiment.py run OUT ZOTERO_SQLITE_COPY SOURCE "QUESTION"
     SOURCE: a collection name, "keys:KEY1,KEY2" (Zotero item keys), or
     "research:N" (snowball the question with research.py, read the N most
@@ -62,6 +66,29 @@ def checks(out):
                 "sentences_with_a_wrong_source", "sentences_left_unsupported")})
             print("   wrong kept:", r["wrong_sources_kept"], " good cut:", r["good_sources_cut"])
     print("parts:", json.dumps(parts_seen, indent=1, ensure_ascii=False))
+
+
+def faithful(out):
+    """The sentence check (_unfaithful) on faithful_gold.jsonl: does it flag
+    the sentences that say more than their findings, and only those?"""
+    with open(os.path.join(HERE, "faithful_gold.jsonl")) as f:
+        gold = [json.loads(line) for line in f if line.strip()]
+    preds, t = {}, time.time()
+    for g in gold:
+        papers = list(dict.fromkeys(s["paper"] for s in g["sources"]))
+        chosen = [{"label": p} for p in papers]
+        found = [(papers.index(s["paper"]) + 1, s["text"], []) for s in g["sources"]]
+        preds[g["id"]] = answer._unfaithful(g["sentence"], found, set(range(len(found))), chosen)
+        flag = "FLAG" if preds[g["id"]] else "    "
+        print(f"{flag} {g['id']} gold={g['gold']}", json.dumps(preds[g["id"]], ensure_ascii=False))
+    print(f"{time.time() - t:.0f}s for {len(gold)} sentences")
+    with open(os.path.join(out, "faithful.json"), "w") as f:
+        json.dump({"method": f"_unfaithful ({os.environ.get('WYR_OLLAMA_MODEL', '')})", "problems": preds},
+                  f, indent=1, ensure_ascii=False)
+    bad = {g["id"] for g in gold if g["gold"] == "unfaithful"}
+    flagged = {i for i, p in preds.items() if p}
+    print(f"caught {len(bad & flagged)}/{len(bad)}; false alarms {len(flagged - bad)}/{len(gold) - len(bad)}:",
+          sorted(flagged - bad), " missed:", sorted(bad - flagged))
 
 
 def papers_from_research(question, n):
@@ -158,5 +185,7 @@ if __name__ == "__main__":
     os.makedirs(out, exist_ok=True)
     if mode == "checks":
         checks(out)
+    elif mode == "faithful":
+        faithful(out)
     else:
         run(out, *sys.argv[3:6])
