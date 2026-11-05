@@ -131,12 +131,12 @@ brackets ([P1], [P2], ...). Use ONLY these claims; never add outside knowledge.
 
 Write at most 10 short answer claims in plain language, ordered so they answer \
 the question. When claims from different papers agree, merge them into one \
-answer claim that lists all their ids. When papers disagree or differ \
+answer claim that lists all their C ids. When papers disagree or differ \
 (population, method, estimate, conclusion), keep that visible: a separate \
 answer claim per side, or one that states the disagreement and lists both \
 sides' ids. Keep numbers and caveats as the claims state them. Every answer \
-claim must list the ids it rests on, and must not say more than those claims \
-say. If part of the question is answered by no claim, say so in "not_addressed".
+claim must list the C ids it rests on (never the P numbers), and must not say \
+more than those claims say. If part of the question is answered by no claim, say so in "not_addressed".
 
 Return ONLY a JSON object: {"claims": [{"claim": "...", "from": ["C1", "C4"]}], \
 "not_addressed": ["..."]}"""
@@ -157,6 +157,36 @@ _META_CLAIM = re.compile(
     r" (?:state|mention|specify|say|address|discuss|provide|report|describe|identify)\b", re.I)
 
 
+def _refs(refs, items: list, found: list) -> set:
+    """The finding ids behind a reply's references to `items`
+    ([(text, {finding ids})]). "C4" (or 4) is the fourth item. "P23" is a paper,
+    which the model sometimes names instead: its number is not an item number,
+    so it means that paper's findings among the items."""
+    ids = set()
+    for kind, num in re.findall(r"([CcPp]?)\s*(\d+)", str(refs)):
+        if kind in "Pp" and kind:
+            ids |= {j for _, item in items for j in item if found[j][0] == int(num)}
+        elif 1 <= int(num) <= len(items):
+            ids |= items[int(num) - 1][1]
+    return ids
+
+
+def _clean(merged: list, data: dict) -> bool:
+    """A merge reply that wasn't cut off and whose sentences all cite something."""
+    return bool(merged) and all(ids for _, ids in merged) and not data.get("truncated")
+
+
+def _survivors(merged: list, data: dict, items: list) -> list:
+    """What a merge call leaves for the next step. A clean reply replaces its
+    items. A reply that was cut off, or has sentences citing nothing, can't be
+    trusted to have covered them, so the items it didn't use carry on as well."""
+    if _clean(merged, data):
+        return merged
+    good = [r for r in merged if r[1]]
+    used = set().union(*(ids for _, ids in good))
+    return good + [item for item in items if not item[1] & used]
+
+
 def _merge(question: str, chosen: list, found: list, items: list) -> tuple:
     """One merge call. `items` are (text, {finding ids}); returns the merged
     (text, {finding ids}) — each resting on the findings of the items it
@@ -175,13 +205,8 @@ def _merge(question: str, chosen: list, found: list, items: list) -> tuple:
     for c in data.get("claims") or []:
         if not isinstance(c, dict) or not (c.get("claim") or "").strip():
             continue
-        ids = set()
-        for ref in c.get("from") or []:
-            m = re.search(r"\d+", str(ref))
-            if m and 1 <= int(m.group(0)) <= len(items):
-                ids |= items[int(m.group(0)) - 1][1]
         # The model echoes "[P1, P3]"; the citations come from the ids.
-        merged.append((_strip_ids(c["claim"]), ids))
+        merged.append((_strip_ids(c["claim"]), _refs(c.get("from"), items, found)))
     return merged, data
 
 
@@ -373,10 +398,7 @@ def _overview(question: str, rows: list, found: list, report) -> list:
         if not isinstance(item, dict):
             continue
         text = _strip_ids(str(item.get("text") or ""))
-        ids = set()
-        for k in re.findall(r"\d+", str(item.get("from") or "")):
-            if 1 <= int(k) <= len(rows):
-                ids |= rows[int(k) - 1][1]
+        ids = _refs(item.get("from"), rows, found)
         if text and ids:
             out.append((text, *_supporting_parts(text, found, ids)))
     return out
@@ -501,20 +523,21 @@ def _combine_merge(question: str, chosen: list, found: list, report, parts: bool
             report(stage="merge", papers=len(chosen), claims=len(found), part=k, parts=len(chunks), round=rnd)
             res, data = _merge(question, chosen, found, chunk)
             truncated = truncated or bool(data.get("truncated"))
-            # A part that failed carries its own findings forward.
-            nxt += [r for r in res if r[1]] or chunk
+            nxt += _survivors(res, data, chunk)
         if len(nxt) >= len(items):        # no progress: stop shrinking
             break
         items = nxt
     report(stage="merge", papers=len(chosen), claims=len(found))
     final, data = _merge(question, chosen, found, items)
     truncated = truncated or bool(data.get("truncated"))
+    if rnd:                               # the items are sentences already: a bad reply can't lose them
+        final = _survivors(final, data, items)
     if len(final) > MAX_ANSWER_CLAIMS:
         # The model sometimes ignores "at most 10" and echoes the findings
         # nearly one by one; one more merge over its own sentences fixes that.
         report(stage="merge", papers=len(chosen), claims=len(final))
         again, data2 = _merge(question, chosen, found, [(t, ids) for t, ids in final if ids])
-        if again and len(again) < len(final):
+        if _clean(again, data2) and len(again) < len(final):
             final, data = again, data2
     checked = []
     for k, (text, ids) in enumerate(final, 1):

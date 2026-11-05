@@ -306,6 +306,54 @@ def test_an_over_long_merge_is_merged_once_more(monkeypatch):
     assert {s["paper"] for s in main[0]["sources"]} == {1, 2}
 
 
+def _found_items(papers):
+    found = [(n, f"finding {i}", ["q"]) for i, n in enumerate(papers)]
+    return found, [(t, {i}) for i, (_, t, _) in enumerate(found)]
+
+
+def test_a_merge_reference_to_a_paper_is_not_read_as_an_item_number():
+    found, items = _found_items([1, 2, 3, 23, 23])
+    assert answer._refs(["C2"], items, found) == {1}
+    assert answer._refs(["P23"], items, found) == {3, 4}     # not out of range, so not lost
+    assert answer._refs(["P3"], items, found) == {2}         # paper 3, which is the third item only by chance
+    assert answer._refs(["P1", "C5"], items, found) == {0, 4}
+    assert answer._refs(["C9"], items, found) == set() and answer._refs(None, items, found) == set()
+
+
+def test_a_bad_merge_reply_does_not_lose_the_findings_it_skipped():
+    found, items = _found_items([1, 2, 3])
+    assert answer._survivors([("All.", {0})], {}, items) == [("All.", {0})]      # a clean reply may drop some
+    cut_off = answer._survivors([("All.", {0})], {"truncated": True}, items)
+    assert cut_off == [("All.", {0}), items[1], items[2]]
+    no_refs = answer._survivors([("All.", {0}), ("Nothing cited.", set())], {}, items)
+    assert no_refs == [("All.", {0}), items[1], items[2]]
+    assert answer._survivors([], {}, items) == items
+
+
+def test_later_papers_reach_the_answer_when_a_merge_names_papers(monkeypatch):
+    monkeypatch.setattr(answer, "MERGE_BATCH", 2)
+    found = [(n, f"finding of paper {n}", ["q"]) for n in range(1, 9)]
+    chosen = [{"label": f"Paper {n}"} for n in range(1, 9)]
+    def complete(system, user, max_tokens=1500):
+        papers = re.findall(r"\[(P\d+)\] Paper", user)
+        return json.dumps({"claims": [{"claim": f"About {p}.", "from": [p]} for p in papers]})
+    monkeypatch.setattr(answer, "_complete", complete)
+    monkeypatch.setattr(answer, "_supporting_parts", lambda text, found, ids: (ids, {}))
+    final, _, _ = answer._combine_merge("Q?", chosen, found, lambda **k: None)
+    assert {found[i][0] for _, ids, _ in final for i in ids} == set(range(1, 9))
+
+
+def test_a_cut_off_second_merge_does_not_replace_the_answer(monkeypatch):
+    monkeypatch.setattr(answer, "MAX_ANSWER_CLAIMS", 1)
+    found = [(n, f"finding of paper {n}", ["q"]) for n in (1, 2, 3)]
+    replies = [json.dumps({"claims": [{"claim": f"Sentence {k}.", "from": [f"C{k}"]} for k in (1, 2, 3)]}),
+               '{"claims": [{"claim": "Only this.", "from": ["C1"]}, {"claim": "Cut o']
+    monkeypatch.setattr(answer, "_complete", lambda *a, **k: replies.pop(0))
+    monkeypatch.setattr(answer, "_supporting_parts", lambda text, found, ids: (ids, {}))
+    final, _, _ = answer._combine_merge("Q?", [{"label": "P"}] * 3, found, lambda **k: None)
+    assert [t for t, _, _ in final] == ["Sentence 1.", "Sentence 2.", "Sentence 3."]
+
+
 def test_merged_sentence_numbers_must_come_from_its_findings(monkeypatch):
     assert answer._unsourced_numbers("a 2ly% to 61% excess risk",
                                      ["a significant 24% to 61% excess risk (P<0.001)"]) == ["2"]
