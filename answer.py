@@ -338,6 +338,50 @@ def _unfaithful(sentence: str, found: list, ids: set, chosen: list) -> list:
     return out
 
 
+_OVERVIEW_SYSTEM = """You write the opening of an answer to a QUESTION from \
+numbered CLAIMS, each already checked against the papers in brackets. Use ONLY \
+these claims; never add outside knowledge.
+
+Write 3 to 5 sentences of plain prose. The first sentence answers the question \
+directly: yes, no, it depends or not settled, or the main value or place when \
+the question asks how much or where. Then give the main results with their key \
+numbers. Where the claims disagree, say so and say what differs between them \
+(population, comparison, method), when the claims state it. Call something a \
+trial, a cohort or a review only if a claim does. Every sentence must list the \
+ids it rests on, and must not say more than those claims say.
+
+Return ONLY a JSON object: {"sentences": [{"text": "...", "from": ["C1", "C4"]}]}"""
+
+
+def _overview(question: str, rows: list, found: list, report) -> list:
+    """A few sentences that answer the question outright, written from the
+    merged claims `rows` ([(sentence, {finding ids})]): the claims hold the
+    evidence, but read as a list they never say yes or no. Each sentence's
+    findings are checked as a merged claim's are. Returns
+    [(sentence, {finding ids}, {id: part})]; [] if the model gives none."""
+    if len(rows) < 2:
+        return []
+    report(stage="overview", claims=len(rows))
+    papers = lambda ids: ", ".join(f"P{n}" for n in sorted({found[i][0] for i in ids}))
+    listing = "\n".join(f"C{k} [{papers(ids)}] {text}" for k, (text, ids) in enumerate(rows, 1))
+    try:
+        data = _parse(_complete(_OVERVIEW_SYSTEM, f"QUESTION: {question}\n\nCLAIMS:\n{listing}", max_tokens=800))
+    except Exception:
+        return []
+    out = []
+    for item in data.get("sentences") or []:
+        if not isinstance(item, dict):
+            continue
+        text = _strip_ids(str(item.get("text") or ""))
+        ids = set()
+        for k in re.findall(r"\d+", str(item.get("from") or "")):
+            if 1 <= int(k) <= len(rows):
+                ids |= rows[int(k) - 1][1]
+        if text and ids:
+            out.append((text, *_supporting_parts(text, found, ids)))
+    return out
+
+
 def _batches(items: list, found: list, size: int) -> list:
     """Consecutive groups of at most `size` items, never splitting one paper's
     findings when a group can take them whole."""
@@ -525,8 +569,8 @@ def ask_many(question: str, papers: list, progress=None, max_papers: int = None,
     """Answer `question` from several papers at once.
 
     `papers` is a list of {"label", "fetched", "pages"?, "key"?}. Returns
-    {question, claims: [{claim, status, sources: [{paper, quote, verified,
-    page}]}], papers: [{n, label, key, cited, abstract_only, used, error?}],
+    {question, overview: [the same fields as a claim], claims: [{claim, status,
+    sources: [{paper, quote, verified, page}]}], papers: [{n, label, key, cited, abstract_only, used, error?}],
     skipped, left_out: [{label, key, reason}], not_addressed, merged,
     confidence, band, grounded, ungrounded}. Papers beyond `max_papers` (the
     least relevant to the question) are left out, reason "limit"; None reads all.
@@ -535,10 +579,12 @@ def ask_many(question: str, papers: list, progress=None, max_papers: int = None,
     Each merged claim that rests on several findings is then checked against
     them, and keeps those that back it wholly or in part (each source carries
     the `part` of the sentence it backs, or None); a claim none back is
-    UNGROUNDED. `method` picks another way to combine (see COMBINE)."""
+    UNGROUNDED. `overview` is a few sentences that answer the question from the
+    merged claims, checked the same way. `method` picks another way to combine
+    (see COMBINE)."""
     report = lambda **kw: progress and progress(kw)
     readable = [p for p in papers if (p.get("fetched") or {}).get("full_text")]
-    out = {"question": question, "claims": [], "not_addressed": [], "papers": [],
+    out = {"question": question, "overview": [], "claims": [], "not_addressed": [], "papers": [],
            "skipped": [p.get("label", "") for p in papers if p not in readable],
            "left_out": [{"label": p.get("label", ""), "key": p.get("key", ""), "reason": "no_text"}
                         for p in papers if p not in readable],
@@ -559,23 +605,28 @@ def ask_many(question: str, papers: list, progress=None, max_papers: int = None,
         return {"paper": n, "quote": quote, "verified": True, "reattributed": False,
                 "page": _library_page(quote, chosen[n - 1].get("pages"))}
 
+    def checked(text, ids, where, k, total):
+        sources = [dict(source(found[i][0], q), part=where.get(i)) for i in sorted(ids) for q in found[i][2]]
+        numbers = _unsourced_numbers(text, [t for i in ids for t in [found[i][1], *found[i][2]]])
+        problems = []
+        if ids:
+            report(stage="wording", claim=k, claims=total)
+            problems = _more_studies_than_papers(text, len({found[i][0] for i in ids}))
+            # A figure the number guard already flags needs no second warning.
+            problems += [p for p in _unfaithful(text, found, ids, chosen)
+                         if not (p["words"] and _numbers(p["words"]) & set(numbers))]
+        return {"claim": text, "sources": sources, "extra": False,
+                "status": "GROUNDED" if sources else "UNGROUNDED",
+                "unsourced_numbers": numbers, "problems": problems}
+
     merged, used = [], set()
     if len(found) > 1:
         final, out["not_addressed"], out["truncated"] = COMBINE[method](question, chosen, found, report)
         for k, (text, ids, where) in enumerate(final, 1):
-            sources = [dict(source(found[i][0], q), part=where.get(i)) for i in sorted(ids) for q in found[i][2]]
             used |= ids
-            numbers = _unsourced_numbers(text, [t for i in ids for t in [found[i][1], *found[i][2]]])
-            problems = []
-            if ids:
-                report(stage="wording", claim=k, claims=len(final))
-                problems = _more_studies_than_papers(text, len({found[i][0] for i in ids}))
-                # A figure the number guard already flags needs no second warning.
-                problems += [p for p in _unfaithful(text, found, ids, chosen)
-                             if not (p["words"] and _numbers(p["words"]) & set(numbers))]
-            merged.append({"claim": text, "sources": sources, "extra": False,
-                           "status": "GROUNDED" if sources else "UNGROUNDED",
-                           "unsourced_numbers": numbers, "problems": problems})
+            merged.append(checked(text, ids, where, k, len(final)))
+        short = _overview(question, [(text, ids) for text, ids, _ in final if ids], found, report)
+        out["overview"] = [checked(text, ids, where, k, len(short)) for k, (text, ids, where) in enumerate(short, 1)]
         out["merged"] = bool(merged)
     else:
         out["not_addressed"] = gaps[:3]

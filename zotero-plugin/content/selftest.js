@@ -64,6 +64,8 @@ Zotero.WorthYourReadSelfTest = {
         st.result = { question: st.question, band: "Medium", confidence: 0.6, grounded: 3, ungrounded: 0,
           merged: true, not_addressed: [],
           papers: [p(1), p(2), p(3), p(4, true), { ...p(5), used: false, cited: 0 }],
+          overview: [{ claim: "SELFTEST short answer: iron in HNLC areas.", status: "GROUNDED", sources: [src(1, 3), src(2, null)] },
+            { claim: "SELFTEST unbacked sentence.", status: "UNGROUNDED", sources: [] }],
           claims: [
             { claim: "Iron limits one third of the ocean, specifically HNLC areas.", status: "GROUNDED", extra: false,
               sources: [src(1, 3, "Iron limits one third of the ocean"), src(2, null, "specifically HNLC areas"),
@@ -82,7 +84,9 @@ Zotero.WorthYourReadSelfTest = {
         const tabText = st.container.textContent;
         log("tabWarnings", { numbers: tabText.includes("Check this: 2 is not in any of its sources"),
           problemWords: tabText.includes("Check this: “another study found” — it reads as 2 studies"),
-          problemNoWords: tabText.includes("Check this: the finding says lesser, not greater") });
+          problemNoWords: tabText.includes("Check this: the finding says lesser, not greater"),
+          shortAnswer: tabText.includes("Short answer") && tabText.includes("SELFTEST short answer: iron in HNLC areas. [1, 2]")
+            && tabText.includes("Check this: none of its findings backs this sentence.") });
         const note = await WYR.saveAskManyNote(st);
         const html = note.getNote();
         log("noteHTML", { firstPaperHasPDF: !!att0?.attachmentReaderType,
@@ -92,6 +96,8 @@ Zotero.WorthYourReadSelfTest = {
           // the first paper's citation sits before ", specifically", the second's after it
           partCitation: html.indexOf('class="citation"', html.indexOf("<p>Iron limits")) < html.indexOf(", specifically HNLC")
             && html.indexOf('class="citation"', html.indexOf(", specifically HNLC")) < html.indexOf("</p>", html.indexOf("<p>Iron limits")),
+          shortAnswer: html.indexOf("<h2>Short answer</h2>") < html.indexOf("SELFTEST short answer")
+            && html.indexOf("SELFTEST short answer") < html.indexOf("<h2>Evidence</h2>"),
           numbersFlag: html.includes("Check: 2 is not in its sources"),
           problemFlags: html.includes("Check: “another study found” — it reads as 2 studies")
             && html.includes("Check: the finding says lesser, not greater"),

@@ -974,7 +974,7 @@ Zotero.WorthYourRead = {
     q.addEventListener("input", () => { st.question = q.value; });
     const limit = h(doc, "input", { type: "number", min: "1", max: String(st.items.length),
       value: String(st.maxPapers), dataset: { wyrLimit: "" }, style: "width:4em" });
-    const minutes = () => `about ${Math.max(1, Math.round((st.maxPapers * 20 + 120) / 60))} min`;
+    const minutes = () => `about ${Math.max(1, Math.round((st.maxPapers * 20 + 180) / 60))} min`;
     const estimate = h(doc, "span", { style: "color:var(--fill-secondary)" }, minutes());
     limit.addEventListener("input", () => {
       const n = Math.round(Number(limit.value));
@@ -1001,6 +1001,7 @@ Zotero.WorthYourRead = {
             : st.progress?.stage === "merge" ? `Merging ${st.progress.claims} findings from ${st.progress.papers} papers`
               + (st.progress.parts ? ` (part ${st.progress.part} of ${st.progress.parts})…` : "…")
               : st.progress?.stage === "check" ? `Checking which findings back each part of answer claim ${st.progress.claim} of ${st.progress.claims}…`
+              : st.progress?.stage === "overview" ? `Writing a short answer from ${st.progress.claims} claims…`
               : st.progress?.stage === "wording" ? `Checking that answer claim ${st.progress.claim} of ${st.progress.claims} says only what its findings say…`
               : "Starting…") : null),
       st.error ? h(doc, "div", { style: "color:#b3261e" }, st.error) : null);
@@ -1036,6 +1037,11 @@ Zotero.WorthYourRead = {
     const claimList = (list) => h(doc, "ol", { style: "padding-left:20px" }, list.map(c =>
       h(doc, "li", { style: "margin-bottom:8px" }, c.claim, numbersWarning(c), ...problemsWarning(c),
         c.sources.filter(s => s.verified).map(sourceLine))));
+    const overview = (r.overview || []).map(c => h(doc, "div", { style: "margin-bottom:4px" },
+      `${c.claim} `, c.sources.length ? `[${[...new Set(c.sources.map(s => s.paper))].join(", ")}]` : "",
+      c.sources.length ? null : h(doc, "div", { style: "color:#b3261e" },
+        "Check this: none of its findings backs this sentence."),
+      numbersWarning(c), ...problemsWarning(c)));
     if (!r.claims.length) {
       return h(doc, "div", { style: "color:#b3261e" },
         r.truncated
@@ -1051,6 +1057,9 @@ Zotero.WorthYourRead = {
         badge(doc, `${r.band} · ${Number(r.confidence).toFixed(2)}`, "#555"), " ",
         `${r.grounded} grounded claim(s), ${r.ungrounded} not verified · `
         + `${r.papers.filter(p => p.used).length} of ${r.papers.length} papers cited`),
+      overview.length ? h(doc, "h3", { style: "margin:10px 0 4px" }, "Short answer") : null,
+      ...overview,
+      overview.length ? h(doc, "h3", { style: "margin:10px 0 4px" }, "Evidence") : null,
       claimList(main),
       extra.length ? h(doc, "h3", { style: "margin:10px 0 4px" }, "Further findings from individual papers") : null,
       extra.length ? claimList(extra) : null,
@@ -1110,14 +1119,23 @@ Zotero.WorthYourRead = {
         + `References and what to read are at the end.</em></p>`];
     const groundedClaims = r.claims.filter(c => c.status === "GROUNDED");
     const ordered = [...groundedClaims.filter(c => !c.extra), ...groundedClaims.filter(c => c.extra)];
+    const warnings = (c) => (c.unsourced_numbers?.length
+      ? ` <span style="background-color: #ff666680">Check: ${esc(c.unsourced_numbers.join(", "))} is not in its sources</span>` : "")
+      + (c.problems || []).map(p => ` <span style="background-color: #ff666680">Check: `
+        + `${p.words ? `“${esc(p.words)}” — ` : ""}${esc(p.why)}</span>`).join("");
+    if (r.overview?.length) {
+      parts.push("<h2>Short answer</h2>");
+      for (const c of r.overview) {
+        const unbacked = c.sources.length ? ""
+          : ` <span style="background-color: #ff666680">Check: none of its findings backs this sentence</span>`;
+        parts.push(`<p>${citedClaimHTML(c.claim, c.sources, n => cite(n))}${unbacked}${warnings(c)}</p>`);
+      }
+      parts.push("<h2>Evidence</h2>");
+    }
     for (const c of ordered) {
       if (c.extra && c === ordered.find(x => x.extra)) parts.push("<h2>Further findings from individual papers</h2>");
       const ok = c.sources.filter(s => s.verified);
-      const warn = c.unsourced_numbers?.length
-        ? ` <span style="background-color: #ff666680">Check: ${esc(c.unsourced_numbers.join(", "))} is not in its sources</span>` : "";
-      const problems = (c.problems || []).map(p => ` <span style="background-color: #ff666680">Check: `
-        + `${p.words ? `“${esc(p.words)}” — ` : ""}${esc(p.why)}</span>`).join("");
-      parts.push(`<p>${citedClaimHTML(c.claim, ok, n => cite(n))}${warn}${problems}</p>`);
+      parts.push(`<p>${citedClaimHTML(c.claim, ok, n => cite(n))}${warnings(c)}</p>`);
       for (const s of ok) {
         const item = itemOf(s.paper);
         const pdf = item && s.page && pdfURL(item, s.page), web = item && !pdf && onlineURL(item);

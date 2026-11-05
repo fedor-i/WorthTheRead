@@ -44,8 +44,8 @@ Steps 2 and 3 run the local model, and 1 and 5 call Bedrock.
    - Retrieval is keyword ("sparse"), because no Ollama embedding model is installed.
    - For dense retrieval, run `ollama pull nomic-embed-text` and set
      `PQA_EMBEDDING=ollama/nomic-embed-text`.
-   - `PQA_MAX_SOURCES=20` lets it cite as widely as we do. Run it both ways
-     if the default looks like it's holding it back.
+   - `PQA_TOOL=paperqa2-wide PQA_EVIDENCE_K=30 PQA_MAX_SOURCES=20` is the wider run.
+     `PQA_TOOL` keeps its answers apart from the default run.
 4. **By hand** (NotebookLM, ReadCube Papers, ...):
    - Load the question's `papers/<id>/NN.txt` (or the same PDFs) into the tool.
    - Ask the question word for word.
@@ -56,6 +56,8 @@ Steps 2 and 3 run the local model, and 1 and 5 call Bedrock.
    `... benchmark/compare/judge_pairs.py run`
    Results are cached, so re-running only judges new sentences.
 6. **Score:** `.venv/bin/python benchmark/compare/score_compare.py --each`
+
+Latest results: [RESULTS.md](RESULTS.md).
 
 ## What the table means
 - **precision:** the share of citations that back their sentence, wholly or in part.

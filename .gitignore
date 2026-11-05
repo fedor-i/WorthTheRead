@@ -25,3 +25,4 @@ zotero-plugin/build/
 .venv-paperqa/
 benchmark/compare/papers/
 benchmark/compare/answers/
+benchmark/compare/judged/

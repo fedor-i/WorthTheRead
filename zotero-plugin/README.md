@@ -31,7 +31,9 @@ with a local Ollama model; the plugin only talks to `127.0.0.1`.
 
 **Ask across papers** — select two or more papers and right-click → *Ask across
 selected papers…*, or right-click a collection → *Ask across this collection…*.
-One question, one answer drawn from all of them. By default every paper is
+One question, one answer drawn from all of them: a short answer of a few
+sentences, written only from the checked findings below it, then the evidence
+claim by claim. By default every paper is
 read; you can lower that in the tab to the N most relevant (or set a default
 with the pref `extensions.wyr.askManyMax`). Each paper is asked on its own — its passages checked against its
 own text — and one more step merges those findings, keeping agreement and

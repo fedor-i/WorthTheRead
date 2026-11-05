@@ -320,6 +320,30 @@ def test_merged_sentence_numbers_must_come_from_its_findings(monkeypatch):
     assert first["claim"] == "Mortality fell by 21%." and first["unsourced_numbers"] == ["21"]
 
 
+def test_overview_answers_from_the_merged_claims_and_is_checked_like_them(monkeypatch):
+    def complete(system, user, max_tokens=1500):
+        if system == answer._MERGE_SYSTEM:
+            return json.dumps({"claims": [{"claim": "Mortality fell in the trial.", "from": ["C1"]},
+                                          {"claim": "The cohort saw no change.", "from": ["C2"]}]})
+        if system == answer._OVERVIEW_SYSTEM:
+            assert "C1 [P1] Mortality fell in the trial." in user and "C2 [P2] The cohort saw no change." in user
+            return json.dumps({"sentences": [
+                {"text": "Not settled: mortality fell by 21% in one paper [C1].", "from": ["C1", "C2"]},
+                {"text": "An invented sentence.", "from": ["C9"]},
+                {"text": "Nobody said this.", "from": []}]})
+        if system == answer._PART_SYSTEM:
+            return json.dumps({"findings": [{"id": "C1", "backs": "part", "part": "mortality fell"},
+                                            {"id": "C2", "backs": "none"}]})
+        return _fake_model("{}")(system, user, max_tokens)
+    monkeypatch.setattr(answer, "_complete", complete)
+    r = answer.ask_many("Does metformin extend life?", [_paper("Trial A", _A_TEXT), _paper("Cohort B", _B_TEXT)])
+    assert [c["claim"] for c in r["overview"]] == ["Not settled: mortality fell by 21% in one paper."]
+    first = r["overview"][0]
+    assert first["status"] == "GROUNDED" and {s["paper"] for s in first["sources"]} == {1}
+    assert first["sources"][0]["part"] == "mortality fell" and first["unsourced_numbers"] == ["21"]
+    assert all(c["claim"] != first["claim"] for c in r["claims"])
+
+
 def test_merge_batches_keep_a_papers_findings_together():
     found = [(n, "x", []) for n in (1, 1, 1, 2, 2, 3, 3, 3)]
     items = [("x", {i}) for i in range(len(found))]
