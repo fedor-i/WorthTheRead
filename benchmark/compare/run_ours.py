@@ -47,10 +47,18 @@ def run(qid: str) -> str:
             saved = json.load(f)
         papers.append({"label": p["label"], "key": p["key"], "fetched": saved["fetched"], "pages": saved["pages"]})
     t = time.time()
-    r = answer.ask_many(m["question"], papers,
-                        progress=lambda p: print(p.get("stage"), p.get("paper") or p.get("claim") or "", end="  ", flush=True))
+    drafts = []
+
+    def progress(p):
+        print(p.get("stage"), p.get("paper") or p.get("claim") or "", end="  ", flush=True)
+        if p.get("draft") and not drafts:
+            drafts.append({**p["draft"], "seconds": round(time.time() - t)})
+
+    r = answer.ask_many(m["question"], papers, progress=progress)
     seconds = time.time() - t
-    common.save_answer("wyr-short", qid, to_shared(qid, m["question"], r, seconds, "wyr-short"))
+    short = to_shared(qid, m["question"], r, seconds, "wyr-short")
+    short["draft"] = drafts[0] if drafts else None         # to compare with the final answer by hand
+    common.save_answer("wyr-short", qid, short)
     path = common.save_answer("wyr", qid, to_shared(qid, m["question"], r, seconds))
     print(f"\n{qid}: {time.time() - t:.0f}s -> {path}")
     return path

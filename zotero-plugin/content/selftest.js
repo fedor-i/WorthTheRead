@@ -61,6 +61,16 @@ Zotero.WorthYourReadSelfTest = {
           key: items[n - 1].key, cited: 1, used: true, abstract_only });
         const src = (paper, page, part = null) => ({ paper, quote: `SELFTEST quote ${paper}`, verified: true, page, part });
         st.question = "SELFTEST notes: iron or nitrogen?";
+        Object.assign(st, { running: true, progress: { stage: "merge", papers: 5, claims: 2,
+          draft: { answer: "SELFTEST draft answer [P1].", passages: 12, papers: 4 },
+          findings: [{ paper: 1, label: "Paper one", claim: "SELFTEST live finding." }] } });
+        WYR.renderAskMany(st);
+        const waiting = st.container.textContent;
+        st.running = false;
+        WYR.renderAskMany(st);
+        log("whileWaiting", { draft: waiting.includes("Quick draft, not checked yet") && waiting.includes("SELFTEST draft answer [P1]."),
+          findings: waiting.includes("Checked findings so far (1)") && waiting.includes("SELFTEST live finding."),
+          goneAfter: !st.container.textContent.includes("SELFTEST draft answer") });
         st.result = { question: st.question, band: "Medium", confidence: 0.6, grounded: 3, ungrounded: 0,
           merged: true, not_addressed: [],
           papers: [p(1), p(2), p(3), p(4, true), { ...p(5), used: false, cited: 0 }],
@@ -96,6 +106,7 @@ Zotero.WorthYourReadSelfTest = {
           // the first paper's citation sits before ", specifically", the second's after it
           partCitation: html.indexOf('class="citation"', html.indexOf("<p>Iron limits")) < html.indexOf(", specifically HNLC")
             && html.indexOf('class="citation"', html.indexOf(", specifically HNLC")) < html.indexOf("</p>", html.indexOf("<p>Iron limits")),
+          noDraft: !html.includes("SELFTEST draft answer") && !tabText.includes("SELFTEST draft answer"),
           shortAnswer: html.indexOf("<h2>Short answer</h2>") < html.indexOf("SELFTEST short answer")
             && html.indexOf("SELFTEST short answer") < html.indexOf("<h2>Evidence</h2>"),
           numbersFlag: html.includes("Check: 2 is not in its sources"),

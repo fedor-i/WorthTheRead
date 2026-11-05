@@ -34,6 +34,22 @@ question took about 15% longer (20.3 minutes in all).
   findings is still a compressed list. Sentences are long, and one says "some
   claims state", which is our own term.
 
+## Update: a quick draft while waiting
+While a run goes on, the plugin shows an unchecked draft from 12 keyword-picked
+passages (at most 3 per paper) and the checked findings so far. The finished
+answer replaces both. This table is from one run on gemma4:26b; the drafts were
+read by hand, not scored by the judge.
+
+| question | draft appeared after | full run | draft against the final answer |
+|---|---|---|---|
+| iron-limits | 15 s | 312 s | same conclusion, less regional detail |
+| iron-biomass | 7 s | 232 s | same main numbers, fewer experiments |
+| false-findings | 6 s | 147 s | thin: names factors and one kind of fix |
+| metformin | 4 s | 616 s | softer: "slightly lower risk", final says "not settled" |
+
+No draft contradicted its final answer or claimed the papers lacked something.
+The short answers and evidence came out word for word as before.
+
 ## Read these numbers with care
 - **Corrected:** the judge passed "greater preselection" although the paper says
   "lesser", so one of our 53 supported sentences is wrong. Our own wording check

@@ -163,7 +163,7 @@ def test_ask_many_asks_each_paper_then_merges_by_claim_id(monkeypatch):
     # the fabricated per-paper quote ("doubled lifespan") never reaches the answer
     assert "doubled" not in json.dumps(r["claims"])
     assert r["merged"] and r["skipped"] == ["Empty"] and all(p["used"] for p in r["papers"])
-    assert [p["stage"] for p in seen] == ["paper", "paper", "merge", "check", "wording"] and r["not_addressed"] == ["cost"]
+    assert [p["stage"] for p in seen] == ["draft", "paper", "paper", "merge", "check", "wording"] and r["not_addressed"] == ["cost"]
     assert 0 < r["confidence"] <= 0.7
 
 
@@ -342,6 +342,44 @@ def test_overview_answers_from_the_merged_claims_and_is_checked_like_them(monkey
     assert first["status"] == "GROUNDED" and {s["paper"] for s in first["sources"]} == {1}
     assert first["sources"][0]["part"] == "mortality fell" and first["unsourced_numbers"] == ["21"]
     assert all(c["claim"] != first["claim"] for c in r["claims"])
+
+
+def test_draft_and_findings_go_out_with_progress_but_not_in_the_result(monkeypatch):
+    def complete(system, user, max_tokens=1500):
+        if system == answer._DRAFT_SYSTEM:
+            assert "PASSAGES:" in user
+            return json.dumps({"answer": "Quick unchecked answer [P1]."})
+        return _fake_model("{}")(system, user, max_tokens)
+    monkeypatch.setattr(answer, "_complete", complete)
+    seen = []
+    r = answer.ask_many("Did mortality fall with metformin?", [_paper("Trial A", _A_TEXT), _paper("Cohort B", _B_TEXT)],
+                        progress=seen.append)
+    assert seen[0]["stage"] == "draft" and "draft" not in seen[0]
+    assert all(p["draft"]["answer"] == "Quick unchecked answer [P1]." for p in seen[1:])
+    assert seen[1]["findings"] == [] and seen[2]["findings"] and seen[2]["findings"][0]["paper"] == 1
+    assert "draft" not in r and "findings" not in r
+
+
+def test_draft_failing_or_finding_nothing_changes_nothing(monkeypatch):
+    def complete(system, user, max_tokens=1500):
+        if system == answer._DRAFT_SYSTEM:
+            raise TimeoutError
+        return _fake_model("{}")(system, user, max_tokens)
+    monkeypatch.setattr(answer, "_complete", complete)
+    seen = []
+    answer.ask_many("Did mortality fall with metformin?", [_paper("Trial A", _A_TEXT), _paper("Cohort B", _B_TEXT)],
+                    progress=seen.append)
+    assert seen[-1].get("draft") is None
+    assert answer._draft("zebra quokka", [_paper("Trial A", _A_TEXT)]) is None
+
+
+def test_draft_passages_are_spread_across_papers_and_skip_reference_lists():
+    paper = lambda text: {"fetched": {"full_text": text}}
+    long_paper = " ".join(f"Iron limits growth in region {i}. " * 20 + "." for i in range(8))
+    refs = "Smith et al. (2001) Iron limits. Jones et al. (2002) Iron growth. Lee et al. (2003) Iron."
+    picked = answer._draft_passages("does iron limit growth", [paper(long_paper), paper("Iron limits growth here."), paper(refs)])
+    assert sum(n == 1 for n, _ in picked) == answer.DRAFT_PER_PAPER
+    assert any(n == 2 for n, _ in picked) and not any(n == 3 for n, _ in picked)
 
 
 def test_merge_batches_keep_a_papers_findings_together():

@@ -997,7 +997,8 @@ Zotero.WorthYourRead = {
           ` most relevant of ${st.items.length} papers `),
         st.running ? null : estimate,
         st.running ? h(doc, "span", { dataset: { wyrProgress: "" } },
-          st.progress?.stage === "paper" ? `Reading paper ${st.progress.paper} of ${st.progress.papers}: ${st.progress.label}…`
+          st.progress?.stage === "draft" ? "Writing a quick draft from a few passages…"
+            : st.progress?.stage === "paper" ? `Reading paper ${st.progress.paper} of ${st.progress.papers}: ${st.progress.label}…`
             : st.progress?.stage === "merge" ? `Merging ${st.progress.claims} findings from ${st.progress.papers} papers`
               + (st.progress.parts ? ` (part ${st.progress.part} of ${st.progress.parts})…` : "…")
               : st.progress?.stage === "check" ? `Checking which findings back each part of answer claim ${st.progress.claim} of ${st.progress.claims}…`
@@ -1005,8 +1006,29 @@ Zotero.WorthYourRead = {
               : st.progress?.stage === "wording" ? `Checking that answer claim ${st.progress.claim} of ${st.progress.claims} says only what its findings say…`
               : "Starting…") : null),
       st.error ? h(doc, "div", { style: "color:#b3261e" }, st.error) : null);
+    if (st.running) root.append(...this.askManyWhileWaiting(doc, st));
     if (st.result) root.append(this.renderAskManyResult(doc, st));
+    // Progress redraws the tab every second: stay where the reader is.
+    const top = st.container.firstChild?.scrollTop || 0;
     st.container.replaceChildren(root);
+    root.scrollTop = top;
+  },
+
+  /** What there is to read during a run. The finished answer replaces it all. */
+  askManyWhileWaiting(doc, st) {
+    const { draft, findings = [] } = st.progress || {};
+    return [
+      draft ? h(doc, "div", { dataset: { wyrDraft: "" },
+        style: "margin:8px 0;padding:8px 10px;border-left:3px solid #9a6700" },
+        h(doc, "b", {}, "Quick draft, not checked yet"),
+        h(doc, "div", { style: "margin:4px 0" }, draft.answer),
+        h(doc, "div", { style: "color:var(--fill-secondary)" },
+          `From ${draft.passages} passages in ${draft.papers} papers. The checked answer will replace this.`)) : null,
+      findings.length ? h(doc, "h3", { style: "margin:10px 0 4px" }, `Checked findings so far (${findings.length})`) : null,
+      findings.length ? h(doc, "ul", { dataset: { wyrFindings: "" }, style: "padding-left:20px" },
+        findings.map(f => h(doc, "li", { style: "margin-bottom:4px" }, `${f.claim} `,
+          h(doc, "span", { style: "color:var(--fill-secondary)" }, `[${f.paper}] ${f.label}`)))) : null
+    ].filter(Boolean);
   },
 
   renderAskManyResult(doc, st) {

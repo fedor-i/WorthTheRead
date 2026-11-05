@@ -405,12 +405,68 @@ def _batches(items: list, found: list, size: int) -> list:
     return groups + ([cur] if cur else [])
 
 
+DRAFT_PASSAGES = 12    # keyword-picked passages behind the quick draft
+DRAFT_PER_PAPER = 3    # so that one long paper can't fill the draft
+
+_DRAFT_SYSTEM = """You write a quick first answer to a QUESTION from PASSAGES \
+of several papers. Each passage starts with its paper, like [P3]. Use ONLY what \
+the passages say. Write 2 to 4 plain sentences and end each with the papers it \
+rests on, like [P3]. These are only a few passages of each paper: never say \
+what the papers lack, omit or fail to report. If no passage bears on the \
+question, return an empty answer.
+
+Return ONLY a JSON object: {"answer": "..."}"""
+
+_REFERENCE_ENTRY = re.compile(r"et al\b|\(\d{4}\)")
+
+
+def _draft_passages(question: str, chosen: list) -> list:
+    """The passages most like the question, by keywords alone: [(paper n,
+    passage)], best first, at most DRAFT_PER_PAPER from a paper. A passage
+    that reads like a reference list is left out."""
+    pool = [(n, passage) for n, p in enumerate(chosen, 1)
+            for bucket, body in _focus.split_sections(p["fetched"].get("full_text") or "")
+            if bucket != "references" for passage in _focus.passages(body)
+            if len(_REFERENCE_ENTRY.findall(passage)) < 3]
+    scores = _focus.bm25_rank(question, [passage for _, passage in pool])
+    picked, per_paper = [], {}
+    for (n, passage), score in sorted(zip(pool, scores), key=lambda x: -x[1]):
+        if score > 0 and per_paper.get(n, 0) < DRAFT_PER_PAPER:
+            picked.append((n, passage))
+            per_paper[n] = per_paper.get(n, 0) + 1
+            if len(picked) == DRAFT_PASSAGES:
+                break
+    return picked
+
+
+def _draft(question: str, chosen: list) -> dict:
+    """One quick call on a few passages, so there is something to read while
+    the papers are read in full. Nothing checks it, so it only travels with
+    the progress and is never part of the result. Returns {answer, passages,
+    papers}, or None if there is nothing to show."""
+    picked = _draft_passages(question, chosen)
+    if not picked:
+        return None
+    listing = "\n\n".join(f"[P{n}] {passage}" for n, passage in picked)
+    try:
+        data = _parse(_complete(_DRAFT_SYSTEM, f"QUESTION: {question}\n\nPASSAGES:\n{listing}", max_tokens=400))
+    except Exception:
+        return None
+    text = str(data.get("answer") or "").strip()
+    return {"answer": text, "passages": len(picked), "papers": len({n for n, _ in picked})} if text else None
+
+
+def _findings_so_far(found: list, chosen: list) -> list:
+    return [{"paper": n, "label": chosen[n - 1].get("label", ""), "claim": text} for n, text, _ in found]
+
+
 def _map(question: str, chosen: list, report) -> tuple:
     """Ask each paper on its own. Returns (found, gaps, paper infos); found is
     [(paper n, claim text, [verified quotes])]."""
     found, gaps, infos = [], [], []
     for n, p in enumerate(chosen, 1):
-        report(stage="paper", paper=n, papers=len(chosen), label=p.get("label", ""))
+        report(stage="paper", paper=n, papers=len(chosen), label=p.get("label", ""),
+               findings=_findings_so_far(found, chosen))
         info = {"n": n, "label": p.get("label", ""), "key": p.get("key", ""), "cited": 0,
                 "used": False, "abstract_only": not p["fetched"].get("has_fulltext")}
         try:
@@ -574,6 +630,8 @@ def ask_many(question: str, papers: list, progress=None, max_papers: int = None,
     skipped, left_out: [{label, key, reason}], not_addressed, merged,
     confidence, band, grounded, ungrounded}. Papers beyond `max_papers` (the
     least relevant to the question) are left out, reason "limit"; None reads all.
+    While it runs, progress reports also carry `draft` (see _draft) and
+    `findings`, the checked findings so far; neither is in the result.
     However many findings come back, no single merge call sees more than
     MERGE_BATCH of them: larger sets are merged in parts, then the parts merged.
     Each merged claim that rests on several findings is then checked against
@@ -582,7 +640,8 @@ def ask_many(question: str, papers: list, progress=None, max_papers: int = None,
     UNGROUNDED. `overview` is a few sentences that answer the question from the
     merged claims, checked the same way. `method` picks another way to combine
     (see COMBINE)."""
-    report = lambda **kw: progress and progress(kw)
+    live = {}                  # goes out with every progress report from here on
+    report = lambda **kw: progress and progress({**live, **kw})
     readable = [p for p in papers if (p.get("fetched") or {}).get("full_text")]
     out = {"question": question, "overview": [], "claims": [], "not_addressed": [], "papers": [],
            "skipped": [p.get("label", "") for p in papers if p not in readable],
@@ -599,7 +658,12 @@ def ask_many(question: str, papers: list, progress=None, max_papers: int = None,
                          "reason": "limit"} for i in order[max_papers:]]
     chosen = [readable[i] for i in sorted(order[:max_papers])]   # keep the user's order
 
+    if len(chosen) > 1:
+        report(stage="draft", papers=len(chosen))
+        live["draft"] = _draft(question, chosen)
+
     found, gaps, out["papers"] = _map(question, chosen, report)
+    live["findings"] = _findings_so_far(found, chosen)
 
     def source(n, quote):
         return {"paper": n, "quote": quote, "verified": True, "reattributed": False,

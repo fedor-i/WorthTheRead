@@ -33,7 +33,10 @@ with a local Ollama model; the plugin only talks to `127.0.0.1`.
 selected papers…*, or right-click a collection → *Ask across this collection…*.
 One question, one answer drawn from all of them: a short answer of a few
 sentences, written only from the checked findings below it, then the evidence
-claim by claim. By default every paper is
+claim by claim. While you wait, the tab shows a quick draft from a few
+keyword-picked passages, marked as not checked, and each paper's checked findings
+as they come in. The finished answer replaces both, and neither goes in the note.
+By default every paper is
 read; you can lower that in the tab to the N most relevant (or set a default
 with the pref `extensions.wyr.askManyMax`). Each paper is asked on its own — its passages checked against its
 own text — and one more step merges those findings, keeping agreement and
