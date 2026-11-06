@@ -131,12 +131,12 @@ brackets ([P1], [P2], ...). Use ONLY these claims; never add outside knowledge.
 
 Write at most 10 short answer claims in plain language, ordered so they answer \
 the question. When claims from different papers agree, merge them into one \
-answer claim that lists all their C ids. When papers disagree or differ \
+answer claim that lists all their ids. When papers disagree or differ \
 (population, method, estimate, conclusion), keep that visible: a separate \
 answer claim per side, or one that states the disagreement and lists both \
 sides' ids. Keep numbers and caveats as the claims state them. Every answer \
-claim must list the C ids it rests on (never the P numbers), and must not say \
-more than those claims say. If part of the question is answered by no claim, say so in "not_addressed".
+claim must list the ids it rests on, and must not say more than those claims \
+say. If part of the question is answered by no claim, say so in "not_addressed".
 
 Return ONLY a JSON object: {"claims": [{"claim": "...", "from": ["C1", "C4"]}], \
 "not_addressed": ["..."]}"""
@@ -282,9 +282,9 @@ def _supporting_parts(sentence: str, found: list, ids: set) -> tuple:
 
 
 def _strip_ids(text: str) -> str:
-    """Drop the ids the model echoes ("[P1, P3]", "[C6]", "[G2]"); the
+    """Drop the ids the model echoes ("[P1, P3]", "[C6]", "(C1, C2)"); the
     citations come from the ids it listed, not from the text."""
-    return re.sub(r"\s*\[(?:[PCG]\d+[,;\s]*)+\]", "", text).strip()
+    return re.sub(r"\s*(?:\[(?:[PCG]\d+[,;\s]*)+\]|\((?:[PCG]\d+[,;\s]*)+\))", "", text).strip()
 
 
 # A figure, not a label: skip digits stuck to letters (CO2, Fe3+) and the

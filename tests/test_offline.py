@@ -360,6 +360,8 @@ def test_merged_sentence_numbers_must_come_from_its_findings(monkeypatch):
     assert answer._unsourced_numbers("rose from 10,000 to 48.5 mg (\u22121.2)",
                                      ["10000 then 48.5", "-1.2"]) == []
     assert answer._strip_ids("Mortality fell [C6], and rose [C1, C17] [P2].") == "Mortality fell, and rose."
+    assert answer._strip_ids("Risk fell (C1, C2, C3) and rose (C5).") == "Risk fell and rose."
+    assert answer._strip_ids("Group (P<0.05) in type (C1) cells.") == "Group (P<0.05) in type cells."
     assert answer._unsourced_numbers("In type 2 diabetes, CO2 fell by 30%", ["CO2 fell by 30%"]) == []
     merge = json.dumps({"claims": [{"claim": "Mortality fell by 21% [C1].", "from": ["C1"]}]})
     monkeypatch.setattr(answer, "_complete", _fake_model(merge))

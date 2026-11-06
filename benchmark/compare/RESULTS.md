@@ -50,6 +50,25 @@ read by hand, not scored by the judge.
 No draft contradicted its final answer or claimed the papers lacked something.
 The short answers and evidence came out word for word as before.
 
+## Update: rerun after the merge fix (2026-11-06)
+
+Worth Your Read only, same papers, same judge. The merge fix (74a9bee) was aimed
+at a 40-paper run. Scores are the judge's own, with the "greater preselection"
+correction in brackets; that sentence is still wrong in all three runs.
+
+| run | evidence supported | short answer supported | leaked ids |
+|---|---|---|---|
+| Before the fix | 53/56, 95% (93%) | 13/16, 81% (75%) | 0 |
+| Fix plus an extra prompt line | 43/49, 88% (86%) | 15/18, 83% (78%) | 21 |
+| Fix alone (final code) | 53/56, 95% (93%) | 13/16, 81% (75%) | 0 |
+
+- The final code's results match the run before the fix on all 4 questions, so
+  the fix changed nothing on these sets. The earlier scores above stand.
+- The prompt line ("list the C ids") changed nearly every sentence and caused the
+  drop and the leaked ids. It has been removed.
+- The model gave the same answers twice from the same prompts, so a small prompt
+  change can move these scores a lot.
+
 ## Read these numbers with care
 - **Corrected:** the judge passed "greater preselection" although the paper says
   "lesser", so one of our 53 supported sentences is wrong. Our own wording check
