@@ -117,10 +117,16 @@ def _ask_many(args: dict) -> dict:
             failed.append(label)
             failed_keys.append({"label": label, "key": spec.get("item_key", ""), "reason": "load_failed"})
             continue
-        papers.append({"label": label, "key": spec.get("item_key", ""),
-                       "fetched": fetched, "pages": pages})
+        papers.append({"label": label, "key": spec.get("item_key", ""), "fetched": fetched, "pages": pages,
+                       "doi": paper.reference if paper.reference.lower().startswith("10.") else ""})
+
+    def follow(doi, title):
+        # A paper an introduction cites, read online; not added to the library.
+        return {"label": title or doi, "key": "", "doi": doi, "pages": [],
+                "fetched": _load(Paper(reference=doi, title=title))[0]}
     r = _answer.ask_many(args["question"], papers, progress=args.get("_progress"),
-                         max_papers=int(args.get("max_papers") or 0) or None)
+                         max_papers=int(args.get("max_papers") or 0) or None,
+                         follow=follow if args.get("follow", True) else None)
     r["skipped"] = failed + r["skipped"]
     r["left_out"] = failed_keys + r["left_out"]
     return r

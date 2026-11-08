@@ -20,6 +20,10 @@ Each key statement gets one label per level of the answer, so a miss shows
 where it was lost: never in the papers read, not read out of them, dropped in
 the merge, or dropped from the short answer. papers/, answers/ and scored/ are
 git-ignored; key/ holds statements in our judge's own words.
+
+`answer` also reads up to answer.FOLLOW_PAPERS papers that the chosen papers'
+introductions cite (cites.py). They are older than the review, being cited by
+papers that are, and are saved to papers/ID/followed.json for scoring.
 """
 import json
 import os
@@ -129,11 +133,19 @@ def extract(r: dict) -> None:
 
 def run_answer(r: dict) -> None:
     papers = _read("papers", r["id"], "papers.json")["papers"]
+    followed = []
+
+    def follow(doi, title):
+        # Cited by a paper older than the review, so older than the review too.
+        got, pages, _ = sidecar._load(sidecar.Paper(title=title, reference=doi))
+        followed.append({"label": title or doi, "key": doi, "fetched": got, "pages": pages})
+        return followed[-1]
     t = time.time()
     out = answer.ask_many(r["question"], papers, progress=lambda p: print(p.get("stage"), end=" ", flush=True),
-                          max_papers=READ_PAPERS)
+                          max_papers=READ_PAPERS, follow=follow)
     out["seconds"] = round(time.time() - t)
     out["read"] = [p["key"] for p in out["papers"]]
+    _write({"id": r["id"], "papers": followed}, "papers", r["id"], "followed.json")
     _write(out, "answers", f"{r['id']}.json")
     print(f"\n{r['id']}: {out['seconds']} s", flush=True)
 
@@ -164,7 +176,7 @@ def cover(statement: dict, texts: dict, passages: list) -> dict:
 def score(r: dict) -> None:
     ans = _read("answers", f"{r['id']}.json")
     read = set(ans["read"])
-    papers = [p for p in _read("papers", r["id"], "papers.json")["papers"] if p["key"] in read]
+    papers = [p for p in _papers_read(r["id"]) if p["key"] in read]
     texts = levels(ans)
     path = _path("scored", f"{r['id']}.json")
     done = {s["text"]: s for s in _read("scored", f"{r['id']}.json")["statements"]} if os.path.exists(path) else {}
@@ -179,10 +191,16 @@ def score(r: dict) -> None:
     _write({"id": r["id"], "statements": rows}, "scored", f"{r['id']}.json")
 
 
+def _papers_read(rid: str) -> list:
+    """The review's loaded papers, plus those its papers' introductions led to."""
+    more = _read("papers", rid, "followed.json")["papers"] if os.path.exists(_path("papers", rid, "followed.json")) else []
+    return _read("papers", rid, "papers.json")["papers"] + more
+
+
 def export(r: dict) -> None:
     """The papers our run read, as plain text, so another tool gets the same ones."""
     read = _read("answers", f"{r['id']}.json")["read"]
-    by_key = {p["key"]: p for p in _read("papers", r["id"], "papers.json")["papers"]}
+    by_key = {p["key"]: p for p in _papers_read(r["id"])}
     out = _path("papers", "_rivals", r["id"])
     os.makedirs(out, exist_ok=True)
     papers = []

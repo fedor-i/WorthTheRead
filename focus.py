@@ -76,8 +76,21 @@ def bm25_rank(query: str, docs: list, k1: float = 1.4, b: float = 0.75) -> list:
     return scores
 
 
-def focus_text(claim: str, full_text: str, max_chars: int) -> str:
+# Marks of a reference list, keyword line or citation block. Reference titles
+# are dense with topic words, so BM25 ranks them high; they took about a sixth
+# of the window. In-text citations like "(Wilson et al., 2006)" don't match.
+_REFERENCE_MARK = re.compile(
+    r"Google Scholar|PubMed|CrossRef|Article CAS|\[ DOI \]|\bdoi[:.]\s*10\.|doi\.org/|"
+    r"Download citation|\bKW - |\b\d+\s*\(\d+\)\s*:\s*\d+|\b\d+\s*:\s*\d+\s*[–-]\s*\d+", re.I)
+
+
+def is_reference(passage: str) -> bool:
+    return len(_REFERENCE_MARK.findall(passage)) >= 2
+
+
+def focus_text(claim: str, full_text: str, max_chars: int, skip: tuple = ()) -> str:
     """The abstract plus the claim's best-matching passages, within max_chars.
+    Reference lists, and the sections named in `skip`, are left out.
 
     Returns full_text unchanged when it already fits (or max_chars <= 0)."""
     if max_chars <= 0 or len(full_text or "") <= max_chars:
@@ -100,7 +113,9 @@ def focus_text(claim: str, full_text: str, max_chars: int) -> str:
                 n_head += 1
             keep.extend((si, pi, p) for pi, p in enumerate(parts[:n_head]))
             budget -= used
-        pool.extend((si, pi, p) for pi, p in enumerate(parts) if pi >= n_head)
+        pool.extend((si, pi, p) for pi, p in enumerate(parts)
+                    if pi >= n_head and bucket != "references" and bucket not in skip
+                    and not is_reference(p))
     scores = bm25_rank(claim, [p for _, _, p in pool])
     for (si, pi, p), _ in sorted(zip(pool, scores), key=lambda x: -x[1]):
         if len(p) + 16 > budget:

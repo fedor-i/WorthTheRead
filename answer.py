@@ -85,8 +85,11 @@ def ask(question: str, fetched: dict, check: bool = False) -> dict:
     if not text:
         out["not_addressed"] = ["No paper text could be read."]
         return out
-    budget = config.OLLAMA_FOCUS_CHARS if config.USE_OLLAMA else 0
-    shown = _focus.focus_text(question, text, budget)
+    budget = config.OLLAMA_READ_CHARS if config.USE_OLLAMA else 0
+    # An introduction mostly restates other papers, so it isn't this paper's
+    # finding; methods took a tenth of the window and gave no finding in the
+    # review benchmark.
+    shown = _focus.focus_text(question, text, budget, skip=("introduction", "methods"))
     data = _parse(_complete(_SYSTEM, f"QUESTION:\n{question}\n\nPAPER TEXT:\n{shown}"))
 
     haystack = _judge._norm(text)
@@ -124,6 +127,7 @@ def ask(question: str, fetched: dict, check: bool = False) -> dict:
 MAX_PAPERS = 12        # the plugin's default when the user doesn't choose
 MERGE_BATCH = 24       # findings per merge call; past this a local model starts dropping papers
 MAX_ANSWER_CLAIMS = 10  # the merge prompt's "at most 10"; a longer answer is merged once more
+FOLLOW_PAPERS = 8      # papers added because the chosen papers' introductions cite them
 
 _MERGE_SYSTEM = """You merge findings from SEVERAL papers into one answer to a \
 QUESTION. You get numbered CLAIMS, each already checked against the paper in \
@@ -491,6 +495,8 @@ def _map(question: str, chosen: list, report) -> tuple:
                findings=_findings_so_far(found, chosen))
         info = {"n": n, "label": p.get("label", ""), "key": p.get("key", ""), "cited": 0,
                 "used": False, "abstract_only": not p["fetched"].get("has_fulltext")}
+        if p.get("via"):
+            info["via"] = p["via"]
         try:
             r = ask(question, p["fetched"])
             for c in r["claims"]:
@@ -643,8 +649,34 @@ COMBINE = {"merge": _combine_merge, "grouped": _combine_grouped,
            "grouped_parts": _combine_grouped_parts}
 
 
+def _doi(p: dict) -> str:
+    key = str(p.get("key") or "")
+    return (p.get("doi") or (key if key.startswith("10.") else "")).lower()
+
+
+def _follow(question: str, chosen: list, readable: list, load, report) -> list:
+    """Papers the chosen papers' introductions cite for this question (see
+    cites.py), each with `via`: one of the papers given but left out by the
+    limit, else `load(doi, title)`, which returns a paper or None."""
+    from . import cites as _cites
+    report(stage="follow", papers=len(chosen))
+    given = {_doi(p): p for p in readable if _doi(p)}
+    have = {_doi(p) for p in chosen}
+    extra = []
+    for row in _cites.to_follow(question, chosen, have, FOLLOW_PAPERS * 2):
+        try:
+            p = given.get(row["doi"]) or load(row["doi"], row["title"])
+        except Exception:
+            p = None
+        if p and (p.get("fetched") or {}).get("full_text"):
+            extra.append(dict(p, doi=row["doi"], via=row["via"]))
+            if len(extra) == FOLLOW_PAPERS:
+                break
+    return extra
+
+
 def ask_many(question: str, papers: list, progress=None, max_papers: int = None,
-             method: str = "merge") -> dict:
+             method: str = "merge", follow=None) -> dict:
     """Answer `question` from several papers at once.
 
     `papers` is a list of {"label", "fetched", "pages"?, "key"?}. Returns
@@ -662,7 +694,9 @@ def ask_many(question: str, papers: list, progress=None, max_papers: int = None,
     the `part` of the sentence it backs, or None); a claim none back is
     UNGROUNDED. `overview` is a few sentences that answer the question from the
     merged claims, checked the same way. `method` picks another way to combine
-    (see COMBINE)."""
+    (see COMBINE). With `follow` (doi, title -> paper or None), up to FOLLOW_PAPERS
+    papers that the chosen ones' introductions cite are read as well; their
+    entry in `papers` carries `via`, the papers that cite them."""
     live = {}                  # goes out with every progress report from here on
     report = lambda **kw: progress and progress({**live, **kw})
     readable = [p for p in papers if (p.get("fetched") or {}).get("full_text")]
@@ -676,10 +710,16 @@ def ask_many(question: str, papers: list, progress=None, max_papers: int = None,
         return out
     order = _rank_papers(question, readable)
     max_papers = len(readable) if not max_papers else max(1, int(max_papers))
-    out["skipped"] += [readable[i].get("label", "") for i in order[max_papers:]]
-    out["left_out"] += [{"label": readable[i].get("label", ""), "key": readable[i].get("key", ""),
-                         "reason": "limit"} for i in order[max_papers:]]
     chosen = [readable[i] for i in sorted(order[:max_papers])]   # keep the user's order
+    limited = [readable[i] for i in order[max_papers:]]
+    if follow and FOLLOW_PAPERS:
+        extra = _follow(question, chosen, readable, follow, report)
+        back = {_doi(p) for p in extra}             # a left-out paper an introduction cites comes back
+        limited = [p for p in limited if not _doi(p) or _doi(p) not in back]
+        chosen += extra
+    out["skipped"] += [p.get("label", "") for p in limited]
+    out["left_out"] += [{"label": p.get("label", ""), "key": p.get("key", ""), "reason": "limit"}
+                        for p in limited]
 
     if len(chosen) > 1:
         report(stage="draft", papers=len(chosen))

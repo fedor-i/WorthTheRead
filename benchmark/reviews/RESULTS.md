@@ -33,3 +33,28 @@ Blind reading test (author, 2026-11-07): the short answers from ours and PaperQA
 side with citations hidden and sides switched between questions. Ours was picked as the
 better answer on both reviews; trust was called a tie on both. Run with `rival TOOL`
 (`run_paperqa.py`); PaperQA2 was not run on the test reviews.
+
+## Update: reading ladder (2026-11-08, tuning reviews)
+
+Each paper is now read from its abstract, results and discussion, in a window of
+18000 characters instead of 12000, with reference lists left out. Introductions
+are not read; instead, the papers they cite for the question are followed
+(cites.py) and up to 8 of them read in their own right. 48 papers read per review.
+
+Of the statements in the papers read (21; 22 before):
+
+| level | before | now |
+|---|---|---|
+| in findings | 50% (11) | 67% (14) |
+| in evidence | 36% (8) | 48% (10) |
+| in short answer | 23% (5) | 24% (5) |
+| short, yes or partly | 50% (11) | 43% (9) |
+
+Lost in reading 11 → 7, in the merge 3 → 4, from the short answer 3 → 5. Per
+review: OCP findings 58% → 82%, evidence 33% → 45%; ferroptosis findings 40% →
+50%, evidence 40% → 50%. 3 of the 8 followed papers were cited in each answer.
+
+- The short answer stays at 4 sentences while the evidence grew (OCP 14 → 21
+  sentences, ferroptosis 20 → 40), so it is now where most is lost.
+- Time doubled: OCP 1010 → 2027 s, ferroptosis 1755 → 4183 s. Another job shared
+  the machine during part of the run, so not all of that is ours.

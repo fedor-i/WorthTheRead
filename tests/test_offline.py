@@ -89,6 +89,21 @@ def test_focus_keeps_relevant_passage_and_fits_budget():
     assert "Corollary 1" in out and "Short abstract." in out
 
 
+def test_focus_leaves_out_reference_lists_but_not_cited_results():
+    ref = ("Wilson A, Kirilovsky D (2006) A soluble carotenoid protein involved in phycobilisome-related "
+           "energy dissipation. Plant Cell 18:992–1007 [ DOI ] [ PubMed ] [ Google Scholar ]")
+    result = ("The OCP from wild-type cells held 60% echinenone and 30% hECN carotenoid "
+              "(Punginelli et al., 2009), and the carotenoid protein quenched fluorescence.")
+    assert focus.is_reference(ref) and not focus.is_reference(result)
+    filler = " ".join(f"Unrelated sentence number {i} about methods." for i in range(400))
+    out = focus.focus_text("carotenoid protein", f"## ABSTRACT\nShort.\n## RESULTS\n{filler} {result} {filler} "
+                           f"{ref} {filler}", 3000)
+    assert "Punginelli" in out and "Plant Cell" not in out
+    intro = f"## ABSTRACT\nShort.\n## INTRODUCTION\n{result}\n## RESULTS\n{filler}"
+    assert "Punginelli" in focus.focus_text("carotenoid protein", intro, 3000)
+    assert "Punginelli" not in focus.focus_text("carotenoid protein", intro, 3000, skip=("introduction",))
+
+
 def test_focus_returns_short_text_unchanged():
     assert focus.focus_text("q", "## ABSTRACT\nshort", 12000) == "## ABSTRACT\nshort"
 
