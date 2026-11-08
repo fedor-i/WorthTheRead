@@ -1,0 +1,12 @@
+[
+ {"id": "ocp", "split": "tune", "doi": "10.1038/nplants.2016.180",
+  "question": "How does the Orange Carotenoid Protein trigger non-photochemical quenching in cyanobacteria?"},
+ {"id": "ferroptosis", "split": "tune", "doi": "10.1038/s41419-020-2298-2",
+  "question": "What are the molecular mechanisms that drive and regulate ferroptosis?"},
+ {"id": "senescence", "split": "test", "doi": "10.1038/s41580-020-00314-w",
+  "question": "What causes cellular senescence, and how do senescent cells contribute to ageing?"},
+ {"id": "aerosol", "split": "test", "doi": "10.1029/2019rg000660",
+  "question": "How large is the aerosol radiative forcing of climate change, and what limits how well it is known?"},
+ {"id": "long-covid", "split": "test", "doi": "10.1038/s41579-022-00846-2",
+  "question": "What are the major findings on long COVID and the proposed mechanisms behind it?"}
+]

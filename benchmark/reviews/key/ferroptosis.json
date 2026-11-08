@@ -1,0 +1,54 @@
+{
+ "id": "ferroptosis",
+ "question": "What are the molecular mechanisms that drive and regulate ferroptosis?",
+ "statements": [
+  {
+   "text": "System Xc- inhibition reduces cystine uptake, depleting glutathione and decreasing GPX4 activity, leading to lipid ROS accumulation and ferroptosis.",
+   "kind": "finding"
+  },
+  {
+   "text": "GPX4 is the key regulator of ferroptosis, converting cytotoxic lipid peroxides to alcohols using glutathione; its inhibition causes lipid peroxide accumulation.",
+   "kind": "finding"
+  },
+  {
+   "text": "Iron metabolism regulates ferroptosis through transferrin receptor-mediated uptake, ferritin storage, and ferroportin export, with excess Fe2+ driving Fenton-like lipid oxidation.",
+   "kind": "finding"
+  },
+  {
+   "text": "The mevalonate pathway regulates GPX4 synthesis by affecting selenocysteine tRNA maturation and produces CoQ10, an endogenous antioxidant.",
+   "kind": "finding"
+  },
+  {
+   "text": "FSP1 functions as an oxidoreductase reducing CoQ10 at the plasma membrane, operating as an independent parallel system with GPX4 to suppress ferroptosis.",
+   "kind": "finding"
+  },
+  {
+   "text": "P53 promotes ferroptosis by downregulating SLC7A11 expression, inhibiting system Xc- cystine uptake, and activating the SAT1-ALOX15 lipid peroxidation pathway.",
+   "kind": "finding"
+  },
+  {
+   "text": "P53 can also inhibit ferroptosis through the P53-P21 axis by regulating GSH metabolism in certain cancer cell types.",
+   "kind": "disagreement"
+  },
+  {
+   "text": "ACSL4 and LPCAT3 activate polyunsaturated fatty acids and incorporate them into membrane phospholipids, creating substrates essential for ferroptotic lipid peroxidation.",
+   "kind": "finding"
+  },
+  {
+   "text": "Lipoxygenases catalyze oxidation of PUFA-containing phosphatidylethanolamine, particularly those with arachidonic acid, to generate ferroptosis-inducing lipid peroxides.",
+   "kind": "finding"
+  },
+  {
+   "text": "Erastin induces ferroptosis through multiple mechanisms including system Xc- inhibition, VDAC targeting causing mitochondrial dysfunction, and promoting GPX4 degradation via chaperone-mediated autophagy.",
+   "kind": "finding"
+  },
+  {
+   "text": "NCOA4-mediated ferritinophagy increases labile iron content in cells by degrading ferritin, thereby promoting ferroptosis through the ATG5-ATG7-NCOA4 pathway.",
+   "kind": "finding"
+  },
+  {
+   "text": "The p62-Keap1-NRF2 pathway provides negative regulation of ferroptosis by activating antioxidant responses in cells.",
+   "kind": "finding"
+  }
+ ]
+}

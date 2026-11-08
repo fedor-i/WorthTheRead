@@ -26,3 +26,6 @@ zotero-plugin/build/
 benchmark/compare/papers/
 benchmark/compare/answers/
 benchmark/compare/judged/
+benchmark/reviews/papers/
+benchmark/reviews/answers/
+benchmark/reviews/scored/

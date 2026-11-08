@@ -1,0 +1,54 @@
+{
+ "id": "senescence",
+ "question": "What causes cellular senescence, and how do senescent cells contribute to ageing?",
+ "statements": [
+  {
+   "text": "Cellular senescence is triggered by multiple stressors including telomere dysfunction, oncogene activation, persistent DNA damage, and organelle stress, all commonly activating DNA damage response pathways.",
+   "kind": "finding"
+  },
+  {
+   "text": "Senescent cells contribute to ageing through the senescence-associated secretory phenotype, which releases proinflammatory cytokines, chemokines, and proteases that impair tissue regeneration and promote chronic inflammation.",
+   "kind": "finding"
+  },
+  {
+   "text": "Telomere shortening below critical length triggers DNA damage response signaling because unprotected telomeres resemble double-strand breaks, establishing replicative senescence.",
+   "kind": "finding"
+  },
+  {
+   "text": "Senescent cells accumulate with age partly because immune system clearance of senescent cells becomes dysfunctional during ageing and disease.",
+   "kind": "finding"
+  },
+  {
+   "text": "The cyclin-dependent kinase inhibitors p21 and p16 are key mediators of senescence-associated growth arrest, with p21 activated early and p16 maintaining the senescent state.",
+   "kind": "finding"
+  },
+  {
+   "text": "Oncogene-induced senescence occurs through hyperproliferation causing aberrant DNA replication, which activates DNA damage response pathways and triggers permanent cell cycle arrest.",
+   "kind": "finding"
+  },
+  {
+   "text": "The cGAS-STING pathway activates SASP by recognizing cytosolic chromatin fragments released from senescent cell nuclei, triggering NF-κB and interferon responses.",
+   "kind": "finding"
+  },
+  {
+   "text": "Mitochondrial dysfunction contributes to senescence establishment, with dysfunctional mitochondria accumulating in senescent cells and causing increased oxidative stress.",
+   "kind": "finding"
+  },
+  {
+   "text": "Senescent cells resist apoptosis through upregulation of BCL-2 family antiapoptotic proteins, contributing to their persistence and accumulation in tissues.",
+   "kind": "finding"
+  },
+  {
+   "text": "Whether autophagy promotes or suppresses senescence remains contested, with evidence showing it can sustain SASP protein synthesis or alternatively prevent senescence by degrading damaged organelles.",
+   "kind": "disagreement"
+  },
+  {
+   "text": "Elimination of senescent cells using genetic models and senolytic drugs ameliorates age-associated diseases in animal models, establishing a causative role for senescent cells in ageing.",
+   "kind": "finding"
+  },
+  {
+   "text": "Stem cell functional capacity declines with age due to DNA damage accumulation and DDR activation, leading to senescence-like programs that reduce regenerative potential.",
+   "kind": "finding"
+  }
+ ]
+}

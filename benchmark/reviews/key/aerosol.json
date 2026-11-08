@@ -1,0 +1,54 @@
+{
+ "id": "aerosol",
+ "question": "How large is the aerosol radiative forcing of climate change, and what limits how well it is known?",
+ "statements": [
+  {
+   "text": "Aerosol effective radiative forcing is assessed between -1.6 and -0.6 W m⁻² at 68% confidence, or -2.0 to -0.4 W m⁻² at 90% confidence, shifted more negative than previous IPCC estimates.",
+   "kind": "finding"
+  },
+  {
+   "text": "The forcing from aerosol-driven increases in liquid cloud droplet number concentration is well constrained by robust theoretical foundations and convincing observational evidence.",
+   "kind": "finding"
+  },
+  {
+   "text": "The influence of anthropogenic aerosols on cloud liquid water content and cloud fraction remains unclear, limiting constraint of aerosol-cloud interaction adjustments.",
+   "kind": "finding"
+  },
+  {
+   "text": "Aerosol effects on mixed-phase and ice clouds remain poorly constrained, representing a major source of uncertainty in total aerosol forcing estimates.",
+   "kind": "finding"
+  },
+  {
+   "text": "Improved understanding of aerosol absorption and trends in surface radiative fluxes now better constrain the forcing from aerosol-radiation interactions.",
+   "kind": "finding"
+  },
+  {
+   "text": "Uncertainty in preindustrial aerosol and cloud distributions limits forcing estimates because these baseline conditions cannot be directly observed.",
+   "kind": "finding"
+  },
+  {
+   "text": "Global climate models produce a range of forcing estimates due to structural differences in radiative transfer, aerosol schemes, cloud parameterizations, and parametric uncertainties.",
+   "kind": "finding"
+  },
+  {
+   "text": "Satellite-derived correlations between aerosol and cloud properties are confounded by meteorological covariability, making causal attribution of aerosol effects difficult.",
+   "kind": "finding"
+  },
+  {
+   "text": "Aerosol single-scattering albedo determines whether aerosols increase or decrease planetary albedo, with critical values depending on underlying surface brightness.",
+   "kind": "finding"
+  },
+  {
+   "text": "Cloud responses to aerosol perturbations include buffering mechanisms where adjustments in cloud water can offset initial albedo increases from droplet number changes.",
+   "kind": "finding"
+  },
+  {
+   "text": "Multiple independent lines of evidence including models, theory, and observations are combined to constrain forcing, as no single approach provides sufficient constraint alone.",
+   "kind": "finding"
+  },
+  {
+   "text": "Future uncertainty reduction requires better constraints on industrial-era changes in aerosol sources and aerosol effects on liquid cloud amount and ice clouds.",
+   "kind": "finding"
+  }
+ ]
+}

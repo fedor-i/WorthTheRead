@@ -1,0 +1,54 @@
+{
+ "id": "long-covid",
+ "question": "What are the major findings on long COVID and the proposed mechanisms behind it?",
+ "statements": [
+  {
+   "text": "Viral persistence is implicated in long COVID, with SARS-CoV-2 spike antigen found in 60% of long COVID patients up to 12 months post-diagnosis versus 0% in recovered controls.",
+   "kind": "finding"
+  },
+  {
+   "text": "Immune dysregulation in long COVID includes exhausted T cells, elevated cytokines like IL-6 and TNF, activated innate immune cells, and alterations persisting at least 13 months after mild acute infection.",
+   "kind": "finding"
+  },
+  {
+   "text": "Approximately half of individuals with long COVID meet diagnostic criteria for myalgic encephalomyelitis/chronic fatigue syndrome, with similar hemodynamic and cognitive abnormalities observed in both conditions.",
+   "kind": "finding"
+  },
+  {
+   "text": "Microclots and hyperactivated platelets are found in long COVID patients, contributing to thrombosis, endothelial dysfunction, and reduced vascular density persisting 18 months after infection.",
+   "kind": "finding"
+  },
+  {
+   "text": "Neurological mechanisms include neuroinflammation, microglial reactivity, myelin loss, reduced grey matter thickness, and brain hypometabolism correlated with cognitive symptoms in long COVID patients.",
+   "kind": "finding"
+  },
+  {
+   "text": "Low cortisol levels with inadequate compensatory ACTH response indicate hypothalamus-pituitary-adrenal axis dysfunction in long COVID patients more than one year after symptom onset.",
+   "kind": "finding"
+  },
+  {
+   "text": "Multiple autoantibodies are elevated in long COVID, targeting receptors including ACE2, muscarinic M2, and angiotensin receptors, though one major study did not find autoantibodies to be a major component.",
+   "kind": "disagreement"
+  },
+  {
+   "text": "Reactivated herpesviruses including EBV and HHV-6 are found in long COVID patients and are associated with fatigue, neurocognitive dysfunction, and mitochondrial fragmentation affecting energy metabolism.",
+   "kind": "finding"
+  },
+  {
+   "text": "Multi-organ damage occurs in long COVID, with 70% of patients showing damage to at least one organ and significantly increased risks of cardiovascular disease, adverse kidney outcomes, and type 2 diabetes.",
+   "kind": "finding"
+  },
+  {
+   "text": "Gut microbiota dysbiosis persists at least 14 months in long COVID, with low butyrate-producing bacteria strongly correlated with long COVID at 6 months and viral RNA persisting in stool samples.",
+   "kind": "finding"
+  },
+  {
+   "text": "POTS is found in 67% of one long COVID cohort, with dysautonomia commonly associated with G protein-coupled receptor autoantibodies and small fiber neuropathy.",
+   "kind": "finding"
+  },
+  {
+   "text": "Insufficient acute immune responses including low baseline IgG, low spike-specific memory B cells, and absent T cell responses predict long COVID development at 6-7 months post-infection.",
+   "kind": "finding"
+  }
+ ]
+}

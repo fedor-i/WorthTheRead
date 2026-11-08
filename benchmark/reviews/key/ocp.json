@@ -1,0 +1,54 @@
+{
+ "id": "ocp",
+ "question": "How does the Orange Carotenoid Protein trigger non-photochemical quenching in cyanobacteria?",
+ "statements": [
+  {
+   "text": "Photoactivation converts the compact orange OCP form to an active red form where the two domains completely separate and the carotenoid translocates 12 Å entirely into the N-terminal effector domain.",
+   "kind": "finding"
+  },
+  {
+   "text": "The activated red OCP binds to the phycobilisome antenna and induces thermal dissipation of excitation energy, decreasing energy transfer to photochemical reaction centers.",
+   "kind": "finding"
+  },
+  {
+   "text": "The fluorescence recovery protein dislodges active OCP from phycobilisomes and accelerates its conversion back to the inactive orange form, terminating the quenching response.",
+   "kind": "finding"
+  },
+  {
+   "text": "OCP-mediated quenching diverts excitation energy away from both photosystem I and photosystem II reaction centers by acting at the phycobilisome level.",
+   "kind": "finding"
+  },
+  {
+   "text": "The N-terminal domain of OCP is the effector domain essential for phycobilisome binding, with a positive charge being important for this interaction.",
+   "kind": "finding"
+  },
+  {
+   "text": "OCP can bind different carotenoids including hydroxyechinenone, zeaxanthin, and echinenone, which influence its photoprotective activity.",
+   "kind": "finding"
+  },
+  {
+   "text": "OCP functions as a light intensity sensor, with blue-green light triggering its photoactivation and subsequent photoprotective response.",
+   "kind": "finding"
+  },
+  {
+   "text": "In vitro reconstitution experiments demonstrated that OCP can directly induce fluorescence quenching in isolated phycobilisomes from Synechocystis.",
+   "kind": "finding"
+  },
+  {
+   "text": "OCP is also an excellent singlet oxygen quencher, providing additional photoprotection beyond its energy dissipation function.",
+   "kind": "finding"
+  },
+  {
+   "text": "The site of quenching within the phycobilisome remains debated, with evidence suggesting involvement of the core components rather than requiring specific terminal emitters like ApcD or ApcE.",
+   "kind": "disagreement"
+  },
+  {
+   "text": "Picosecond fluorescence studies revealed that OCP binding creates a new quenching pathway that competes with normal energy transfer within the phycobilisome.",
+   "kind": "finding"
+  },
+  {
+   "text": "OCP expression is upregulated under high light and other stress conditions including salt stress, indicating its role in environmental acclimation.",
+   "kind": "finding"
+  }
+ ]
+}
