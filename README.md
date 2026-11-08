@@ -1,15 +1,41 @@
 # Worth Your Read
 
-An MCP tool that verifies an answer's claims are actually supported by the
-publications they cite. For each claim it: resolves the link, checks the paper
-isn't retracted, fetches the paper's **actual results** (not just the abstract),
-and rules **SUPPORTED / OVERSTATED / UNSUPPORTED / INSUFFICIENT** — backed by
-verbatim quotes that are *machine-verified* against the source text.
+Worth Your Read answers research questions from your own papers and shows where
+every sentence comes from. Ask one question across a Zotero collection: each
+paper is read on its own, every quote is checked against that paper's text, and
+each citation sits right after the part of the sentence it backs. Where papers
+disagree, the answer says so. It runs on a local model, so your library never
+leaves your machine.
 
-The point: give an agent a grounding layer so it stops citing papers that don't
-say what it claims.
+In a side-by-side test (4 questions, 68 papers, the same local model for every
+tool, judged by Claude Opus 4.5), it beat PaperQA2 on every accuracy measure:
 
-## Quick install (for a collaborator)
+| | Worth Your Read | PaperQA2 |
+| --- | --- | --- |
+| Sentences backed by the papers they cite | **95%** | 65 to 69% |
+| Sentences with no citation | **0** | 6 to 7 |
+| Citations that point at the right paper | **99%** | 89 to 94% |
+| Papers drawn on (of 68) | **39** | 16 to 23 |
+
+Method and full results: [benchmark/compare/RESULTS.md](benchmark/compare/RESULTS.md).
+
+It also checks single citations: give it a claim and a DOI and it resolves the
+link, checks the paper isn't retracted, reads the **actual results** (not just
+the abstract), and rules **SUPPORTED / OVERSTATED / UNSUPPORTED / INSUFFICIENT**,
+with quotes checked against the source text.
+
+## Use it in Zotero
+
+Install the local sidecar and the plugin, then right-click a collection and
+choose *Ask across this collection*. Steps: [zotero-plugin/README.md](zotero-plugin/README.md#install).
+It needs [Ollama](https://ollama.com) with `gemma4:26b`.
+
+## Use it from an AI assistant (MCP)
+
+The same engine is an MCP server, so an agent can check its own citations
+before it shows them to you.
+
+### Quick install
 
 Install straight from GitHub — no clone needed:
 
@@ -31,7 +57,7 @@ an MCP client — e.g. Claude Desktop's `claude_desktop_config.json`:
 }
 ```
 
-Restart the client and the three tools appear. If `worth-your-read` isn't on
+Restart the client and the tools appear. If `worth-your-read` isn't on
 your PATH, use its full path (`pip show -f worth-your-read` locates it) or
 `python -m worth_your_read.server`. No API key? If your MCP client supports
 **sampling**, the judge runs on the client's own model — omit `ANTHROPIC_API_KEY`
@@ -74,7 +100,7 @@ and drop `WYR_USE_BEDROCK`.
 | Resolve link + retraction check | Crossref (`updated-by` field) + NCBI ID Converter |
 | Fetch real results | PMC BioC JSON → Europe PMC XML → preprint HTML (bioRxiv/medRxiv, then arXiv/ar5iv) → OA-publisher HTML → **OA PDF** (OpenAlex/Crossref/Semantic Scholar/Unpaywall, parsed with pypdf) → abstract (Europe PMC, then Semantic Scholar). PMCID recovered via Europe PMC when NCBI didn't link it |
 | Judge | Claude (forced structured output) |
-| Anti-hallucination guard | every quote must be an exact substring of the source, else the verdict is forced to INSUFFICIENT |
+| Anti-hallucination guard | every quote must be found in the source text (tolerant of PDF extraction noise), else the verdict is forced to INSUFFICIENT |
 
 If no open-access full text is available, the check runs on the abstract only,
 is clearly labelled as such, and confidence is capped.
@@ -221,13 +247,15 @@ Wire it into an MCP client (e.g. Claude Desktop `claude_desktop_config.json`):
 
 ## Status
 
-Retrieval, retraction detection, scoring, and card rendering are verified
-against live APIs. The judge path (the Claude call) is written but needs an
-`ANTHROPIC_API_KEY` to exercise end-to-end.
+Offline tests cover the pipeline without a model. Benchmarks with their results:
+the comparison with PaperQA2 ([benchmark/compare](benchmark/compare/RESULTS.md)),
+multi-source attribution ([benchmark/multi_source_results.md](benchmark/multi_source_results.md))
+and recovering a review's key statements from the papers it cites
+([benchmark/reviews](benchmark/reviews/RESULTS.md)).
 
-## Limitations (MVP)
+## Limitations
 
-- Open-access full text only (PMC OA); paywalled papers fall back to abstract.
-- No PDF parsing, embeddings/RAG (text is truncated), or multi-citation-per-claim.
+- Open-access full text, or PDFs already in your library; paywalled papers
+  outside your library fall back to the abstract.
 - The judge is evidence-locating, not peer review; it flags when a claim needs
   domain expertise it lacks.
