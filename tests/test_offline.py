@@ -104,6 +104,20 @@ def test_focus_leaves_out_reference_lists_but_not_cited_results():
     assert "Punginelli" not in focus.focus_text("carotenoid protein", intro, 3000, skip=("introduction",))
 
 
+def test_reading_window_grows_with_the_paper_up_to_the_cap(monkeypatch):
+    monkeypatch.setattr(answer.config, "OLLAMA_READ_CHARS", 18000)
+    body = lambda n: "## ABSTRACT\nShort.\n## INTRODUCTION\n" + "Background. " * 3000 + "\n## RESULTS\n" + \
+        " ".join(f"Result {i} was measured." for i in range(n))
+    own = lambda n: focus.own_length(body(n), ("introduction", "methods"))
+    assert own(100) < 3000                                       # the introduction doesn't count
+    assert answer._read_chars(body(100), "standard") == 6000      # at least 6000
+    assert answer._read_chars(body(1000), "standard") == own(1000) // 2
+    assert answer._read_chars(body(5000), "standard") == 18000    # at most the cap
+    assert answer._read_chars(body(1000), "deep") == 18000
+    # a short paper's introduction is left out too
+    assert "Background" not in focus.focus_text("result", body(10), 6000, skip=("introduction",))
+
+
 def test_focus_returns_short_text_unchanged():
     assert focus.focus_text("q", "## ABSTRACT\nshort", 12000) == "## ABSTRACT\nshort"
 
@@ -178,7 +192,7 @@ def test_ask_many_asks_each_paper_then_merges_by_claim_id(monkeypatch):
     # the fabricated per-paper quote ("doubled lifespan") never reaches the answer
     assert "doubled" not in json.dumps(r["claims"])
     assert r["merged"] and r["skipped"] == ["Empty"] and all(p["used"] for p in r["papers"])
-    assert [p["stage"] for p in seen] == ["draft", "paper", "paper", "merge", "check", "wording"] and r["not_addressed"] == ["cost"]
+    assert [p["stage"] for p in seen] == ["draft", "paper", "paper", "merge", "check", "vote", "wording"] and r["not_addressed"] == ["cost"]
     assert 0 < r["confidence"] <= 0.7
 
 
@@ -391,7 +405,8 @@ def test_overview_answers_from_the_merged_claims_and_is_checked_like_them(monkey
             return json.dumps({"claims": [{"claim": "Mortality fell in the trial.", "from": ["C1"]},
                                           {"claim": "The cohort saw no change.", "from": ["C2"]}]})
         if system == answer._OVERVIEW_SYSTEM:
-            assert "C1 [P1] Mortality fell in the trial." in user and "C2 [P2] The cohort saw no change." in user
+            assert "C1 [P1] (1 paper) Mortality fell in the trial." in user and "C2 [P2] (1 paper) The cohort saw no change." in user
+            assert "MAX SENTENCES: 5" in user
             return json.dumps({"sentences": [
                 {"text": "Not settled: mortality fell by 21% in one paper [C1].", "from": ["C1", "C2"]},
                 {"text": "An invented sentence.", "from": ["C9"]},
@@ -407,6 +422,10 @@ def test_overview_answers_from_the_merged_claims_and_is_checked_like_them(monkey
     assert first["status"] == "GROUNDED" and {s["paper"] for s in first["sources"]} == {1}
     assert first["sources"][0]["part"] == "mortality fell" and first["unsourced_numbers"] == ["21"]
     assert all(c["claim"] != first["claim"] for c in r["claims"])
+
+
+def test_short_answer_grows_with_the_evidence():
+    assert [answer.overview_sentences(n) for n in (2, 10, 15, 21, 40)] == [5, 5, 6, 7, 8]
 
 
 def test_draft_and_findings_go_out_with_progress_but_not_in_the_result(monkeypatch):
@@ -708,3 +727,75 @@ def test_ask_many_flags_merged_sentences_that_say_more_than_their_findings(monke
     # the number guard already flags 21: no second warning for it; two papers, so "another study" is fine
     assert first["problems"] == [{"words": "longer life", "why": "the finding says users lived longer"}]
     assert "wording" in [p["stage"] for p in seen]
+
+
+def test_last_places_go_to_the_most_cited_of_the_next_papers():
+    papers = [{"cited_by": c} for c in (5, 0, 1, 900, 3, 50, 7, 10_000)]
+    order = list(range(8))                      # by relevance
+    # 4 to read: 3 by relevance, 1 by citations among the next 3 (paper 3, not 7, which ranks past the pool)
+    assert answer._choose(order, papers, 4)[:4] == [0, 1, 2, 3]
+    assert answer._choose(order, papers, 8) == order
+    assert answer._choose([2, 0, 1], [{}, {}, {}], 2) == [2, 0, 1]   # no counts: relevance alone
+    chosen = answer._choose(order, [{"cited_by": c} for c in (5, 0, 1, 0, 900, 3, 50, 7)], 4)
+    assert chosen[:4] == [0, 1, 2, 4] and sorted(chosen) == order
+
+
+def test_reviews_do_not_take_the_places_given_by_citations():
+    papers = [{"cited_by": 1}, {"cited_by": 1}, {"cited_by": 1}, {"cited_by": 9000, "review": True},
+              {"cited_by": 50}, {"cited_by": 2}, {"cited_by": 0}, {"cited_by": 0}]
+    assert answer._choose(list(range(8)), papers, 4)[:4] == [0, 1, 2, 4]
+
+
+def test_merged_claims_are_put_to_the_vote_of_the_other_papers(monkeypatch):
+    texts = {"A": "OCP binds the phycobilisome through its C-terminal domain.",
+             "B": "The N-terminal domain of OCP binds the phycobilisome core.",
+             "C": "Cross-linking places the N-terminal domain of OCP in the phycobilisome core.",
+             "D": "OCP binds the phycobilisome core through its N-terminal domain, as reviewed.",
+             "E": "Strong blue-green light converts OCP to its active red form."}
+
+    def complete(system, user, max_tokens=1500):
+        if system == answer._MERGE_SYSTEM:
+            return json.dumps({"claims": [{"claim": "OCP binds the phycobilisome via its C-terminal domain.",
+                                           "from": ["C1"]},
+                                          {"claim": "Light converts OCP to its red form.", "from": ["C5"]}]})
+        if system == answer._VOTE_SYSTEM:
+            listing = user.split("FINDINGS:\n")[1].splitlines()
+            if "C-terminal" in user.split("FINDINGS:")[0]:
+                return json.dumps({"findings": [{"id": f"F{k}", "says": "contradicts" if "N-terminal" in line
+                                                 else "unrelated"} for k, line in enumerate(listing, 1)]})
+            return json.dumps({"findings": [{"id": f"F{k}", "says": "agrees" if "red form" in line else "unrelated"}
+                                            for k, line in enumerate(listing, 1)]})
+        if system == answer._OVERVIEW_SYSTEM:
+            assert "C-terminal" not in user                      # an outvoted claim stays out of the short answer
+            return json.dumps({"sentences": []})
+        for key, text in texts.items():
+            if text in user:
+                return json.dumps({"claims": [{"claim": text.rstrip("."), "quotes": [text.rstrip(".")]}]})
+        return "{}"
+    monkeypatch.setattr(answer, "_complete", complete)
+    papers = [_paper(k, t) for k, t in texts.items()]
+    papers[3]["review"] = True
+    papers.append(_paper("F", "Blue-green light turns OCP into the red form."))
+    texts["F"] = "Blue-green light turns OCP into the red form."
+    r = answer.ask_many("How does OCP quench?", papers)
+    light, terminal = r["claims"][0], r["claims"][1]
+    assert terminal["claim"].startswith("OCP binds") and terminal["vote"]["outvoted"]
+    # the review contradicts too, but doesn't vote
+    assert terminal["vote"]["against"] == [2, 3, 4] and terminal["vote"]["votes"] == [1, 2]
+    assert {s["paper"] for s in terminal["against"]} == {2, 3, 4}
+    # a finding from another paper that agrees now backs the claim
+    assert light["vote"]["papers"] == [5, 6] and not light["vote"]["outvoted"]
+    assert {s["paper"] for s in light["sources"]} == {5, 6}
+
+
+
+def test_a_quote_shown_as_the_papers_words_must_be_word_for_word():
+    hay = judge._norm_alnum("OCP binds the core of the phycobilisome. The C-terminal domain regulates it.")
+    assert answer._verbatim("OCP binds the core of the phycobilisome", hay)
+    assert answer._verbatim("OCP binds the core ... the C-terminal domain regulates it.", hay)
+    # a true start with changed words after it, or one word slipped in, is not the paper's text
+    assert not answer._verbatim("OCP binds the core of the phycobilisome via its N-terminal domain", hay)
+    assert not answer._verbatim("OCP binds the core and of the phycobilisome", hay)
+    assert not answer._verbatim("OCP binds the core ... and the N-terminal domain", hay)
+    # a part of a word is not a word
+    assert not answer._verbatim("CP binds the core of the phyco", hay)

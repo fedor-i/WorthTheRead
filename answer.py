@@ -72,8 +72,40 @@ def _salvage(raw: str) -> dict:
     return {"claims": claims, "truncated": True} if claims else {"truncated": bool(raw)}
 
 
-def ask(question: str, fetched: dict, check: bool = False) -> dict:
-    """Answer `question` from `fetched` (a fetch_text / library.load dict).
+# How much of each paper a question reads. Both leave out reference lists,
+# methods (a tenth of the window, no finding in the review benchmark) and the
+# introduction, which mostly restates other papers. Standard reads a share of
+# what is left, so a long paper gets a wider window than a short one: on the
+# review benchmark, half (6000 to 18000 characters) cost about what a fixed
+# 12000 did and showed the best passage for 18 statements of 22, not 16. Deep
+# reads all of it up to config.OLLAMA_READ_CHARS, and follows the introduction's
+# citations to the papers they cite (ask_many).
+DEPTHS = {"standard": {"share": 0.5, "min": 6000, "skip": ("introduction", "methods"), "follow": False},
+          "deep": {"share": None, "min": 0, "skip": ("introduction", "methods"), "follow": True}}
+
+
+def _read_chars(text: str, depth: str) -> int:
+    how = DEPTHS[depth]
+    if how["share"] is None:
+        return config.OLLAMA_READ_CHARS
+    own = _focus.own_length(text, how["skip"])
+    return min(config.OLLAMA_READ_CHARS, max(how["min"], int(own * how["share"])))
+
+
+def _verbatim(quote: str, haystack_alnum: str) -> bool:
+    """The quote is in the paper word for word (ignoring case, punctuation and
+    spacing). A quote joined from pieces with "..." passes only if every piece
+    is. Stricter than judge._quote_verified, which accepts a quote whose start
+    or any ten-word run matches: the model sometimes adds or changes words
+    after a true start, and the answer shows quotes as the paper's own words."""
+    pieces = [_judge._norm_alnum(p) for p in re.split(r"\.\.\.|…", quote)]
+    pieces = [p for p in pieces if p]
+    return bool(pieces) and len(" ".join(pieces)) >= 12 and all(f" {p} " in f" {haystack_alnum} " for p in pieces)
+
+
+def ask(question: str, fetched: dict, check: bool = False, depth: str = "standard") -> dict:
+    """Answer `question` from `fetched` (a fetch_text / library.load dict),
+    reading it at `depth` (see DEPTHS).
 
     Returns {question, claims: [{claim, status, quotes: [{text, verified}],
     verdict?, confidence?}], not_addressed, confidence, band, grounded,
@@ -85,18 +117,15 @@ def ask(question: str, fetched: dict, check: bool = False) -> dict:
     if not text:
         out["not_addressed"] = ["No paper text could be read."]
         return out
-    budget = config.OLLAMA_READ_CHARS if config.USE_OLLAMA else 0
-    # An introduction mostly restates other papers, so it isn't this paper's
-    # finding; methods took a tenth of the window and gave no finding in the
-    # review benchmark.
-    shown = _focus.focus_text(question, text, budget, skip=("introduction", "methods"))
+    budget = _read_chars(text, depth) if config.USE_OLLAMA else 0
+    shown = _focus.focus_text(question, text, budget, skip=DEPTHS[depth]["skip"])
     data = _parse(_complete(_SYSTEM, f"QUESTION:\n{question}\n\nPAPER TEXT:\n{shown}"))
 
-    haystack = _judge._norm(text)
+    haystack = _judge._norm_alnum(text)
     for c in data.get("claims") or []:
         if not isinstance(c, dict) or not (c.get("claim") or "").strip():
             continue
-        quotes = [{"text": q, "verified": _judge._quote_verified(q, haystack)}
+        quotes = [{"text": q, "verified": _verbatim(q, haystack)}
                   for q in (c.get("quotes") or []) if isinstance(q, str) and q.strip()]
         grounded = any(q["verified"] for q in quotes)
         out["claims"].append({"claim": c["claim"].strip(),
@@ -151,6 +180,31 @@ def _rank_papers(question: str, papers: list) -> list:
     docs = [(p.get("fetched") or {}).get("full_text") or "" for p in papers]
     scores = _focus.bm25_rank(question, [_focus.focus_text(question, d, 4000) for d in docs])
     return sorted(range(len(papers)), key=lambda i: -scores[i])
+
+
+# Picking which papers to read when there are more than max_papers. Ranking by
+# word match alone left a landmark paper (FSP1, Nature 2019, ~3.5k citations)
+# just past the cut: its text matched the question less densely than narrower
+# papers. So three quarters of the places go by relevance, and the rest to the
+# most-cited of the papers that come next (up to CITED_POOL x max_papers deep).
+# On the tuning reviews this put the best passage for 20 of 24 review statements
+# in the papers read, against 15. Reviews (a paper's `review`) are always well
+# cited, so they don't compete for these places; they still can on relevance.
+RELEVANCE_SHARE = 0.75
+CITED_POOL = 1.5
+
+
+def _choose(order: list, papers: list, max_papers: int) -> list:
+    """`order` (indices by relevance) with the places after the first
+    RELEVANCE_SHARE of `max_papers` refilled by citation count (a paper's
+    `cited_by`), reviews last. Unchanged when no paper has a count."""
+    if max_papers >= len(order) or not any(p.get("cited_by") for p in papers):
+        return order
+    keep = max(1, round(max_papers * RELEVANCE_SHARE))
+    pool = order[keep:max(max_papers, int(max_papers * CITED_POOL))]
+    cited = sorted(pool, key=lambda i: (bool(papers[i].get("review")),
+                                        -(papers[i].get("cited_by") or 0)))[:max_papers - keep]
+    return order[:keep] + cited + [i for i in order[keep:] if i not in cited]
 
 
 # A per-paper "finding" that is about the paper, not the question ("The study
@@ -285,6 +339,72 @@ def _supporting_parts(sentence: str, found: list, ids: set) -> tuple:
     return keep, parts
 
 
+VOTE_CANDIDATES = 16   # other papers' findings most like a merged claim, put to the vote
+
+_VOTE_SYSTEM = """You compare a CLAIM with FINDINGS from other papers. First \
+name the claim's specific point: the detail that makes it more than a general \
+statement (a site, domain, molecule, mechanism, direction or number). Then, for \
+each finding, answer:
+- "agrees" only if the finding on its own states that same specific point. A \
+finding that matches only the general part, and is silent on the specific \
+point, does not agree.
+- "contradicts" only if the finding and the claim cannot both be true: it \
+gives a different value of the same specific point (another site, domain, \
+mechanism, direction or result for the same thing). A finding that adds \
+another factor, works alongside, gives more detail, or says something is \
+still unknown does not contradict.
+- "neither" otherwise.
+Return ONLY a JSON object: {"point": "...", "findings": [{"id": "F1", "says": \
+"agrees"}, {"id": "F2", "says": "contradicts"}, {"id": "F3", "says": "neither"}]}"""
+
+
+def _vote(text: str, found: list, ids: set) -> tuple:
+    """Findings of OTHER papers that agree with, and that contradict, a merged
+    claim: ({agreeing ids}, {contradicting ids}). The merge only joins the
+    findings it grouped together, so a claim backed by one paper may be backed
+    by others too, or contradicted by them. ({}, {}) if the check fails."""
+    own = {found[i][0] for i in ids}
+    others = [i for i in range(len(found)) if found[i][0] not in own]
+    scores = _focus.bm25_rank(text, [found[i][1] for i in others])
+    cand = [i for s, i in sorted(zip(scores, others), key=lambda x: -x[0]) if s > 0][:VOTE_CANDIDATES]
+    if not cand:
+        return set(), set()
+    listing = "\n".join(f"F{k} {found[i][1]}" for k, i in enumerate(cand, 1))
+    try:
+        data = _parse(_complete(_VOTE_SYSTEM, f"CLAIM:\n{text}\n\nFINDINGS:\n{listing}", max_tokens=60 * len(cand) + 100))
+    except Exception:
+        return set(), set()
+    agree, against = set(), set()
+    for f in data.get("findings") or []:
+        m = re.search(r"\d+", str(f.get("id", ""))) if isinstance(f, dict) else None
+        if m and 1 <= int(m.group(0)) <= len(cand):
+            says = str(f.get("says", "")).lower()
+            (agree if says == "agrees" else against if says == "contradicts" else set()).add(cand[int(m.group(0)) - 1])
+    return agree, against
+
+
+def _tally(ids: set, against: set, found: list, reviews: set) -> dict:
+    """Papers for and against a claim. Reviews are listed but don't vote: they
+    repeat what other papers found. A claim is outvoted when more original
+    papers contradict it than back it, and at least two do."""
+    pro = {found[i][0] for i in ids}
+    con = {found[i][0] for i in against} - pro
+    votes = (len(pro - reviews), len(con - reviews))
+    return {"papers": sorted(pro), "against": sorted(con), "votes": list(votes),
+            "reviews_only": bool(pro) and pro <= reviews,
+            "outvoted": votes[1] >= 2 and votes[1] > votes[0]}
+
+
+def _note(t: dict) -> str:
+    """How the short-answer prompt sees a claim's backing."""
+    n = len(t["papers"])
+    note = "reviews only" if t["reviews_only"] else f"{n} paper{'s' * (n != 1)}"
+    if t["against"]:
+        note += (f"; DISPUTED: {', '.join(f'P{n}' for n in t['against'])} say otherwise, "
+                 f"{t['votes'][0]} vs {t['votes'][1]} original papers")
+    return note
+
+
 def _strip_ids(text: str) -> str:
     """Drop the ids the model echoes ("[P1, P3]", "[C6]", "(C1, C2)"); the
     citations come from the ids it listed, not from the text."""
@@ -371,20 +491,36 @@ _OVERVIEW_SYSTEM = """You write the opening of an answer to a QUESTION from \
 numbered CLAIMS, each already checked against the papers in brackets. Use ONLY \
 these claims; never add outside knowledge.
 
-Write 3 to 5 sentences of plain prose. The first sentence answers the question \
-directly: yes, no, it depends or not settled, or the main value or place when \
-the question asks how much or where. Then give the main results with their key \
-numbers. Where the claims disagree, say so and say what differs between them \
-(population, comparison, method), when the claims state it. Call something a \
+Write plain prose, from 3 sentences up to MAX SENTENCES. The first sentence \
+answers the question directly: yes, no, it depends or not settled, or the main \
+value or place when the question asks how much or where. Then cover the \
+distinct main points the claims make (a mechanism, factor or result each), one \
+per sentence, most important first, so that together the sentences touch every \
+major theme of the claims. For each point say what it does or what was found, \
+with its key numbers; never just name things without saying what they do. \
+Where the claims disagree, say so and say what differs between them \
+(population, comparison, method), when the claims state it. Each claim says \
+how many papers back it: build on the claims several papers back. Use a claim \
+marked "reviews only" only for a point no other claim makes. A claim marked \
+DISPUTED must be given as disputed, saying which view more papers hold; never \
+state it as settled. Call something a \
 trial, a cohort or a review only if a claim does. Every sentence must list the \
 ids it rests on, and must not say more than those claims say.
 
 Return ONLY a JSON object: {"sentences": [{"text": "...", "from": ["C1", "C4"]}]}"""
 
 
+def overview_sentences(claims: int) -> int:
+    """How long the short answer may be: 5 sentences, one more per 5 merged
+    claims past 10, at most 8. At a fixed 3-5 it named the factors of a broad
+    answer (21-40 claims) without saying what they do."""
+    return max(5, min(8, 3 + claims // 5))
+
+
 def _overview(question: str, rows: list, found: list, report) -> list:
     """A few sentences that answer the question outright, written from the
-    merged claims `rows` ([(sentence, {finding ids})]): the claims hold the
+    merged claims `rows` ([(sentence, {finding ids}, note?)]; the note says how
+    many papers back it and whether others dispute it): the claims hold the
     evidence, but read as a list they never say yes or no. Each sentence's
     findings are checked as a merged claim's are. Returns
     [(sentence, {finding ids}, {id: part})]; [] if the model gives none."""
@@ -392,9 +528,14 @@ def _overview(question: str, rows: list, found: list, report) -> list:
         return []
     report(stage="overview", claims=len(rows))
     papers = lambda ids: ", ".join(f"P{n}" for n in sorted({found[i][0] for i in ids}))
-    listing = "\n".join(f"C{k} [{papers(ids)}] {text}" for k, (text, ids) in enumerate(rows, 1))
+    rows = [(r[0], r[1], r[2] if len(r) > 2 else "") for r in rows]
+    listing = "\n".join(f"C{k} [{papers(ids)}]{f' ({note})' if note else ''} {text}"
+                        for k, (text, ids, note) in enumerate(rows, 1))
+    rows = [(text, ids) for text, ids, _ in rows]
+    most = overview_sentences(len(rows))
     try:
-        data = _parse(_complete(_OVERVIEW_SYSTEM, f"QUESTION: {question}\n\nCLAIMS:\n{listing}", max_tokens=800))
+        data = _parse(_complete(_OVERVIEW_SYSTEM, f"QUESTION: {question}\n\nMAX SENTENCES: {most}\n\n"
+                                f"CLAIMS:\n{listing}", max_tokens=160 * most + 200))
     except Exception:
         return []
     out = []
@@ -486,7 +627,7 @@ def _findings_so_far(found: list, chosen: list) -> list:
     return [{"paper": n, "label": chosen[n - 1].get("label", ""), "claim": text} for n, text, _ in found]
 
 
-def _map(question: str, chosen: list, report) -> tuple:
+def _map(question: str, chosen: list, report, depth: str = "standard") -> tuple:
     """Ask each paper on its own. Returns (found, gaps, paper infos); found is
     [(paper n, claim text, [verified quotes])]."""
     found, gaps, infos = [], [], []
@@ -497,8 +638,10 @@ def _map(question: str, chosen: list, report) -> tuple:
                 "used": False, "abstract_only": not p["fetched"].get("has_fulltext")}
         if p.get("via"):
             info["via"] = p["via"]
+        if p.get("review"):
+            info["review"] = True
         try:
-            r = ask(question, p["fetched"])
+            r = ask(question, p["fetched"], depth=depth)
             for c in r["claims"]:
                 quotes = [q["text"] for q in c["quotes"] if q["verified"]]
                 if _META_CLAIM.search(c["claim"]):
@@ -676,10 +819,11 @@ def _follow(question: str, chosen: list, readable: list, load, report) -> list:
 
 
 def ask_many(question: str, papers: list, progress=None, max_papers: int = None,
-             method: str = "merge", follow=None) -> dict:
+             method: str = "merge", follow=None, depth: str = "standard") -> dict:
     """Answer `question` from several papers at once.
 
-    `papers` is a list of {"label", "fetched", "pages"?, "key"?}. Returns
+    `papers` is a list of {"label", "fetched", "pages"?, "key"?, "cited_by"?}
+    (cited_by: citation count, used to pick papers; see _choose). Returns
     {question, overview: [the same fields as a claim], claims: [{claim, status,
     sources: [{paper, quote, verified, page}]}], papers: [{n, label, key, cited, abstract_only, used, error?}],
     skipped, left_out: [{label, key, reason}], not_addressed, merged,
@@ -694,9 +838,10 @@ def ask_many(question: str, papers: list, progress=None, max_papers: int = None,
     the `part` of the sentence it backs, or None); a claim none back is
     UNGROUNDED. `overview` is a few sentences that answer the question from the
     merged claims, checked the same way. `method` picks another way to combine
-    (see COMBINE). With `follow` (doi, title -> paper or None), up to FOLLOW_PAPERS
-    papers that the chosen ones' introductions cite are read as well; their
-    entry in `papers` carries `via`, the papers that cite them."""
+    (see COMBINE). Each paper is read at `depth` (see DEPTHS); at "deep", with
+    `follow` (doi, title -> paper or None), up to FOLLOW_PAPERS papers that the
+    chosen ones' introductions cite are read as well, and their entry in
+    `papers` carries `via`, the papers that cite them."""
     live = {}                  # goes out with every progress report from here on
     report = lambda **kw: progress and progress({**live, **kw})
     readable = [p for p in papers if (p.get("fetched") or {}).get("full_text")]
@@ -708,11 +853,11 @@ def ask_many(question: str, papers: list, progress=None, max_papers: int = None,
     if not readable:
         out["not_addressed"] = ["None of the papers had readable text."]
         return out
-    order = _rank_papers(question, readable)
     max_papers = len(readable) if not max_papers else max(1, int(max_papers))
+    order = _choose(_rank_papers(question, readable), readable, max_papers)
     chosen = [readable[i] for i in sorted(order[:max_papers])]   # keep the user's order
     limited = [readable[i] for i in order[max_papers:]]
-    if follow and FOLLOW_PAPERS:
+    if follow and FOLLOW_PAPERS and DEPTHS[depth]["follow"]:
         extra = _follow(question, chosen, readable, follow, report)
         back = {_doi(p) for p in extra}             # a left-out paper an introduction cites comes back
         limited = [p for p in limited if not _doi(p) or _doi(p) not in back]
@@ -725,7 +870,7 @@ def ask_many(question: str, papers: list, progress=None, max_papers: int = None,
         report(stage="draft", papers=len(chosen))
         live["draft"] = _draft(question, chosen)
 
-    found, gaps, out["papers"] = _map(question, chosen, report)
+    found, gaps, out["papers"] = _map(question, chosen, report, depth)
     live["findings"] = _findings_so_far(found, chosen)
 
     def source(n, quote):
@@ -749,10 +894,26 @@ def ask_many(question: str, papers: list, progress=None, max_papers: int = None,
     merged, used = [], set()
     if len(found) > 1:
         final, out["not_addressed"], out["truncated"] = COMBINE[method](question, chosen, found, report)
+        # Each merged claim goes to the vote of the other papers' findings:
+        # those that agree back it too; those that contradict it are kept
+        # with it, and a claim more original papers contradict is outvoted.
+        reviews = {n for n, p in enumerate(chosen, 1) if p.get("review")}
+        voted = []
         for k, (text, ids, where) in enumerate(final, 1):
+            agree, against = set(), set()
+            if ids:
+                report(stage="vote", claim=k, claims=len(final))
+                agree, against = _vote(text, found, ids)
+            voted.append((text, ids | agree, where, _tally(ids | agree, against, found, reviews), against))
+        voted.sort(key=lambda v: v[3]["outvoted"])          # outvoted claims last
+        for k, (text, ids, where, tally, against) in enumerate(voted, 1):
             used |= ids
-            merged.append(checked(text, ids, where, k, len(final)))
-        short = _overview(question, [(text, ids) for text, ids, _ in final if ids], found, report)
+            c = checked(text, ids, where, k, len(voted))
+            c["vote"] = tally
+            c["against"] = [source(found[i][0], q) for i in sorted(against) for q in found[i][2]]
+            merged.append(c)
+        short = _overview(question, [(text, ids, _note(tally)) for text, ids, _, tally, _ in voted
+                                     if ids and not tally["outvoted"]], found, report)
         out["overview"] = [checked(text, ids, where, k, len(short)) for k, (text, ids, where) in enumerate(short, 1)]
         out["merged"] = bool(merged)
     else:

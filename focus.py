@@ -88,12 +88,21 @@ def is_reference(passage: str) -> bool:
     return len(_REFERENCE_MARK.findall(passage)) >= 2
 
 
+def own_length(full_text: str, skip: tuple = ()) -> int:
+    """Characters of the paper focus_text could show: none of the sections in
+    `skip`, no reference lists."""
+    return sum(len(p) for bucket, body in split_sections(full_text)
+               if bucket != "references" and bucket not in skip
+               for p in passages(body) if not is_reference(p))
+
+
 def focus_text(claim: str, full_text: str, max_chars: int, skip: tuple = ()) -> str:
     """The abstract plus the claim's best-matching passages, within max_chars.
     Reference lists, and the sections named in `skip`, are left out.
 
-    Returns full_text unchanged when it already fits (or max_chars <= 0)."""
-    if max_chars <= 0 or len(full_text or "") <= max_chars:
+    Returns full_text unchanged when it already fits (or max_chars <= 0) and
+    no section is to be skipped."""
+    if max_chars <= 0 or (len(full_text or "") <= max_chars and not skip):
         return full_text or ""
     secs = split_sections(full_text)
     keep, budget = [], max_chars

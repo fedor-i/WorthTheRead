@@ -85,6 +85,8 @@ def test_ask_many_reads_papers_the_introductions_cite(monkeypatch):
                                                             "has_fulltext": True}}
         raise ValueError("no text")
     r = answer.ask_many("Does metformin lower mortality?", papers, max_papers=1, follow=load)
+    assert len(r["papers"]) == 1 and loaded == []                # following is for deep research only
+    r = answer.ask_many("Does metformin lower mortality?", papers, max_papers=1, follow=load, depth="deep")
     assert loaded == ["10.1/new", "10.1/gone"]                  # the left-out paper came back without a fetch
     assert [(p["label"], p.get("via")) for p in r["papers"]] == [("Trial A", None), ("Left out", [1]), ("New", [1])]
     assert r["left_out"] == [] and r["skipped"] == []

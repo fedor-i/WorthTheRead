@@ -217,6 +217,13 @@ function leftOutLines(r) {
     .map(p => p.reason ? `${p.label} (${LEFT_OUT[p.reason] || p.reason})` : p.label);
 }
 
+/** How many papers back a merged claim, and which contradict it (see answer._tally). */
+function voteText(v) {
+  return !v ? "" : (v.reviews_only ? "Backed by reviews only" : `Backed by ${v.papers.length} paper${v.papers.length === 1 ? "" : "s"}`)
+    + (v.against.length ? `; papers ${v.against.join(", ")} say otherwise (${v.votes[0]} vs ${v.votes[1]} original papers)` : "")
+    + (v.outvoted ? " — most papers disagree" : "");
+}
+
 /** A claim as HTML with each paper's citation placed right after each part of
  * the sentence it backs (`source.part`; a paper backing two parts is cited at
  * both), or at the end when it backs the whole sentence; `cite(n)` gives a
@@ -941,7 +948,8 @@ Zotero.WorthYourRead = {
     // 0 (the default) reads every paper; the user can lower it in the tab.
     const limit = Number(Zotero.Prefs.get("extensions.wyr.askManyMax", true)) || papers.length;
     const st = { tabID, container, items: papers, collection, title, question: "",
-      maxPapers: Math.min(papers.length, limit), running: false, result: null, error: null, note: null };
+      maxPapers: Math.min(papers.length, limit), depth: "standard", running: false, result: null, error: null,
+      note: null };
     this.askManys.push(st);
     this.renderAskMany(st);
     return st;
@@ -957,7 +965,8 @@ Zotero.WorthYourRead = {
         const { paper } = await paperFor(item);
         specs.push({ ...paper, label: shortLabel(item), item_key: item.key });
       }
-      st.result = await Client.run("ask_many", { question: st.question, papers: specs, max_papers: st.maxPapers },
+      st.result = await Client.run("ask_many", { question: st.question, papers: specs, max_papers: st.maxPapers,
+        depth: st.depth },
         (p) => { st.progress = p; this.renderAskMany(st); });
     }
     catch (e) { st.error = e.message; }
@@ -974,13 +983,22 @@ Zotero.WorthYourRead = {
     q.addEventListener("input", () => { st.question = q.value; });
     const limit = h(doc, "input", { type: "number", min: "1", max: String(st.items.length),
       value: String(st.maxPapers), dataset: { wyrLimit: "" }, style: "width:4em" });
-    const minutes = () => `about ${Math.max(1, Math.round((st.maxPapers * 20 + 180) / 60))} min`;
+    // Deep research reads wider and follows up to 8 cited papers: about twice as long.
+    const minutes = () => `about ${Math.max(1, Math.round((st.maxPapers * 20 + 180) / 60)
+      * (st.depth === "deep" ? 2 : 1))} min`;
     const estimate = h(doc, "span", { style: "color:var(--fill-secondary)" }, minutes());
     limit.addEventListener("input", () => {
       const n = Math.round(Number(limit.value));
       if (n >= 1) st.maxPapers = Math.min(n, st.items.length);
       estimate.textContent = minutes();
     });
+    const depth = h(doc, "select", { dataset: { wyrDepth: "" } },
+      h(doc, "option", { value: "standard" }, "standard"),
+      h(doc, "option", { value: "deep" }, "deep research"));
+    depth.value = st.depth;
+    depth.title = "Deep research reads more of each paper and, instead of a paper's introduction, "
+      + "the original papers it cites (fetched online, not added to your library).";
+    depth.addEventListener("change", () => { st.depth = depth.value; estimate.textContent = minutes(); });
     const root = h(doc, "div", { dataset: { wyrAskMany: "" },
       style: "overflow:auto;height:100%;padding:16px 24px;box-sizing:border-box;font-size:13px;"
         + "background:var(--material-background);color:var(--fill-primary)" },
@@ -995,13 +1013,16 @@ Zotero.WorthYourRead = {
           ...(st.running ? { disabled: "true" } : {}) }, st.result ? "Ask again" : "Ask"),
         st.running ? null : h(doc, "label", {}, "reading the ", limit,
           ` most relevant of ${st.items.length} papers `),
+        st.running ? null : depth,
         st.running ? null : estimate,
         st.running ? h(doc, "span", { dataset: { wyrProgress: "" } },
-          st.progress?.stage === "draft" ? "Writing a quick draft from a few passages…"
+          st.progress?.stage === "follow" ? "Finding the papers their introductions cite…"
+          : st.progress?.stage === "draft" ? "Writing a quick draft from a few passages…"
             : st.progress?.stage === "paper" ? `Reading paper ${st.progress.paper} of ${st.progress.papers}: ${st.progress.label}…`
             : st.progress?.stage === "merge" ? `Merging ${st.progress.claims} findings from ${st.progress.papers} papers`
               + (st.progress.parts ? ` (part ${st.progress.part} of ${st.progress.parts})…` : "…")
               : st.progress?.stage === "check" ? `Checking which findings back each part of answer claim ${st.progress.claim} of ${st.progress.claims}…`
+              : st.progress?.stage === "vote" ? `Asking the other papers whether they back or contradict answer claim ${st.progress.claim} of ${st.progress.claims}…`
               : st.progress?.stage === "overview" ? `Writing a short answer from ${st.progress.claims} claims…`
               : st.progress?.stage === "wording" ? `Checking that answer claim ${st.progress.claim} of ${st.progress.claims} says only what its findings say…`
               : "Starting…") : null),
@@ -1056,9 +1077,13 @@ Zotero.WorthYourRead = {
       `Check this: ${c.unsourced_numbers.join(", ")} is not in any of its sources — the merge may have changed a figure.`) : null;
     const problemsWarning = (c) => (c.problems || []).map(p => h(doc, "div", { style: "color:#b3261e" },
       `Check this: ${p.words ? `“${p.words}” — ` : ""}${p.why}`));
+    const voteLine = (c) => c.vote ? h(doc, "div", { style: `color:${c.vote.outvoted || c.vote.against.length ? "#b3261e" : "#555"}` },
+      voteText(c.vote)) : null;
     const claimList = (list) => h(doc, "ol", { style: "padding-left:20px" }, list.map(c =>
-      h(doc, "li", { style: "margin-bottom:8px" }, c.claim, numbersWarning(c), ...problemsWarning(c),
-        c.sources.filter(s => s.verified).map(sourceLine))));
+      h(doc, "li", { style: "margin-bottom:8px" }, c.claim, voteLine(c), numbersWarning(c), ...problemsWarning(c),
+        c.sources.filter(s => s.verified).map(sourceLine),
+        (c.against || []).length ? h(doc, "div", { style: "margin-top:4px" }, h(doc, "b", {}, "Against:"),
+          c.against.map(sourceLine)) : null)));
     const overview = (r.overview || []).map(c => h(doc, "div", { style: "margin-bottom:4px" },
       `${c.claim} `, c.sources.length ? `[${[...new Set(c.sources.map(s => s.paper))].join(", ")}]` : "",
       c.sources.length ? null : h(doc, "div", { style: "color:#b3261e" },
@@ -1157,7 +1182,9 @@ Zotero.WorthYourRead = {
     for (const c of ordered) {
       if (c.extra && c === ordered.find(x => x.extra)) parts.push("<h2>Further findings from individual papers</h2>");
       const ok = c.sources.filter(s => s.verified);
-      parts.push(`<p>${citedClaimHTML(c.claim, ok, n => cite(n))}${warnings(c)}</p>`);
+      const disputed = c.vote?.against?.length
+        ? ` <span style="background-color: #ffd40080">${esc(voteText(c.vote))}</span>` : "";
+      parts.push(`<p>${citedClaimHTML(c.claim, ok, n => cite(n))}${disputed}${warnings(c)}</p>`);
       for (const s of ok) {
         const item = itemOf(s.paper);
         const pdf = item && s.page && pdfURL(item, s.page), web = item && !pdf && onlineURL(item);

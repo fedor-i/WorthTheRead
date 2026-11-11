@@ -124,9 +124,11 @@ def _ask_many(args: dict) -> dict:
         # A paper an introduction cites, read online; not added to the library.
         return {"label": title or doi, "key": "", "doi": doi, "pages": [],
                 "fetched": _load(Paper(reference=doi, title=title))[0]}
+    max_papers = int(args.get("max_papers") or 0) or None
+    _research_mod.add_paper_facts(papers)          # citation counts pick papers; reviews don't vote
     r = _answer.ask_many(args["question"], papers, progress=args.get("_progress"),
-                         max_papers=int(args.get("max_papers") or 0) or None,
-                         follow=follow if args.get("follow", True) else None)
+                         max_papers=max_papers,
+                         follow=follow, depth=args.get("depth") if args.get("depth") in _answer.DEPTHS else "standard")
     r["skipped"] = failed + r["skipped"]
     r["left_out"] = failed_keys + r["left_out"]
     return r

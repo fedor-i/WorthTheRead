@@ -43,9 +43,10 @@ OLLAMA_TIMEOUT = float(os.environ.get("WYR_OLLAMA_TIMEOUT", "600"))
 # best BM25-matched passages (see focus.py). Smaller is faster; 0 = read it all.
 # Quotes are still verified against the full text either way.
 OLLAMA_FOCUS_CHARS = int(os.environ.get("WYR_OLLAMA_FOCUS_CHARS", "12000"))
-# The same for reading a paper to answer a question (answer.ask). A question
-# spans more of a paper than one claim does: at 12000 the best passage for 7 of
-# 11 missed review statements was left out.
+# The most of a paper read to answer a question (answer.ask; see answer.DEPTHS
+# for how much below this each depth reads). A question spans more of a paper
+# than one claim does: at 12000 the best passage for 7 of 11 missed review
+# statements was left out.
 OLLAMA_READ_CHARS = int(os.environ.get("WYR_OLLAMA_READ_CHARS", "18000"))
 
 # Contact email for the Crossref / NCBI "polite pools". Optional — we only send

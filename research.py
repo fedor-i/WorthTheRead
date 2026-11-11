@@ -91,6 +91,19 @@ def fetch_works(ids: list = (), dois: list = ()) -> list:
     return out
 
 
+def add_paper_facts(papers: list, doi=lambda p: p.get("doi")) -> None:
+    """Set each paper's `cited_by` and `review` (answer.ask_many reads both)
+    from OpenAlex. Offline or unknown papers are left without them."""
+    try:
+        works = {w["doi"]: w for w in fetch_works(dois=[doi(p) for p in papers if doi(p)]) if w.get("doi")}
+    except Exception:
+        return
+    for p in papers:
+        w = works.get(_discover.clean_doi(doi(p)))
+        if w:
+            p["cited_by"], p["review"] = w["cited_by"], w["type"] == "review"
+
+
 def fetch_citing(work_ids: list, per_paper: int) -> list:
     """Works citing any of `work_ids`, most-cited first: one request per 25
     papers (OpenAlex ORs the ids), up to `per_paper` results each on average.

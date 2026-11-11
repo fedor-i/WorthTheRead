@@ -21,9 +21,11 @@ where it was lost: never in the papers read, not read out of them, dropped in
 the merge, or dropped from the short answer. papers/, answers/ and scored/ are
 git-ignored; key/ holds statements in our judge's own words.
 
-`answer` also reads up to answer.FOLLOW_PAPERS papers that the chosen papers'
-introductions cite (cites.py). They are older than the review, being cited by
-papers that are, and are saved to papers/ID/followed.json for scoring.
+`answer --deep` (then `score --deep`, `table --deep`) reads at deep research
+depth, kept apart in answers/deep and scored/deep: it also reads up to
+answer.FOLLOW_PAPERS papers that the chosen papers' introductions cite
+(cites.py). They are older than the review, being cited by papers that are,
+and are saved to papers/ID/followed.json for scoring.
 """
 import json
 import os
@@ -38,6 +40,8 @@ from worth_your_read import answer, focus, research, sidecar, store  # noqa: E40
 
 LOAD_PAPERS = 80       # cited papers fetched, the ones closest to the question
 READ_PAPERS = 40       # as in the OCP run; ask_many ranks them by their full text
+DEPTH = "standard"     # --deep: answer.DEPTHS["deep"], kept apart in answers/deep and scored/deep
+ANSWERS, SCORED = "answers", "scored"
 KEY_STATEMENTS = 12
 PASSAGES = 8           # per statement, for "is it in the papers read at all"
 LEVELS = ("reachable", "findings", "evidence", "short")
@@ -133,6 +137,7 @@ def extract(r: dict) -> None:
 
 def run_answer(r: dict) -> None:
     papers = _read("papers", r["id"], "papers.json")["papers"]
+    research.add_paper_facts(papers, doi=lambda p: p["key"])   # today's counts, not the review year's
     followed = []
 
     def follow(doi, title):
@@ -142,11 +147,12 @@ def run_answer(r: dict) -> None:
         return followed[-1]
     t = time.time()
     out = answer.ask_many(r["question"], papers, progress=lambda p: print(p.get("stage"), end=" ", flush=True),
-                          max_papers=READ_PAPERS, follow=follow)
+                          max_papers=READ_PAPERS, follow=follow, depth=DEPTH)
     out["seconds"] = round(time.time() - t)
     out["read"] = [p["key"] for p in out["papers"]]
-    _write({"id": r["id"], "papers": followed}, "papers", r["id"], "followed.json")
-    _write(out, "answers", f"{r['id']}.json")
+    if DEPTH == "deep":
+        _write({"id": r["id"], "papers": followed}, "papers", r["id"], "followed.json")
+    _write(out, ANSWERS, f"{r['id']}.json")
     print(f"\n{r['id']}: {out['seconds']} s", flush=True)
 
 
@@ -174,12 +180,12 @@ def cover(statement: dict, texts: dict, passages: list) -> dict:
 
 
 def score(r: dict) -> None:
-    ans = _read("answers", f"{r['id']}.json")
+    ans = _read(ANSWERS, f"{r['id']}.json")
     read = set(ans["read"])
     papers = [p for p in _papers_read(r["id"]) if p["key"] in read]
     texts = levels(ans)
-    path = _path("scored", f"{r['id']}.json")
-    done = {s["text"]: s for s in _read("scored", f"{r['id']}.json")["statements"]} if os.path.exists(path) else {}
+    path = _path(SCORED, f"{r['id']}.json")
+    done = {s["text"]: s for s in _read(SCORED, f"{r['id']}.json")["statements"]} if os.path.exists(path) else {}
     rows = []
     for s in _read("key", f"{r['id']}.json")["statements"]:
         prev = done.get(s["text"])
@@ -188,7 +194,7 @@ def score(r: dict) -> None:
             continue
         rows.append({**s, **cover(s, texts, top_passages(s["text"], papers))})
         print(r["id"], rows[-1]["kind"], [rows[-1][k] for k in LEVELS], flush=True)
-    _write({"id": r["id"], "statements": rows}, "scored", f"{r['id']}.json")
+    _write({"id": r["id"], "statements": rows}, SCORED, f"{r['id']}.json")
 
 
 def _papers_read(rid: str) -> list:
@@ -199,7 +205,7 @@ def _papers_read(rid: str) -> list:
 
 def export(r: dict) -> None:
     """The papers our run read, as plain text, so another tool gets the same ones."""
-    read = _read("answers", f"{r['id']}.json")["read"]
+    read = _read(ANSWERS, f"{r['id']}.json")["read"]
     by_key = {p["key"]: p for p in _papers_read(r["id"])}
     out = _path("papers", "_rivals", r["id"])
     os.makedirs(out, exist_ok=True)
@@ -244,10 +250,10 @@ def table(split: str) -> None:
           "short, yes or partly | conflicts in short |\n|---|---|---|---|---|---|---|---|")
     every = []
     for r in reviews(split=split):
-        if not os.path.exists(_path("scored", f"{r['id']}.json")):
+        if not os.path.exists(_path(SCORED, f"{r['id']}.json")):
             print(f"| {r['id']} | not scored yet |")
             continue
-        rows = _read("scored", f"{r['id']}.json")["statements"]
+        rows = _read(SCORED, f"{r['id']}.json")["statements"]
         every += rows
         print(_row(r["id"], tally(rows)))
     if every:
@@ -263,6 +269,8 @@ def _row(name: str, t: dict) -> str:
 if __name__ == "__main__":
     store.enable()
     step, ids = sys.argv[1], [a for a in sys.argv[2:] if not a.startswith("--")]
+    if "--deep" in sys.argv:
+        DEPTH, ANSWERS, SCORED = "deep", os.path.join("answers", "deep"), os.path.join("scored", "deep")
     if step == "rival":
         for row in reviews(ids[1:]):
             rows = [s for s in rival(ids[0], row) if s["reachable"] in ("yes", "partly")]
