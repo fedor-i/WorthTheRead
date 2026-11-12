@@ -711,7 +711,8 @@ def ask_across(question: str, references: list = None, max_papers: int = 6,
         except Exception as e:
             left_out.append({"label": ref, "key": "", "reason": f"load_failed: {type(e).__name__}"})
             continue
-        papers.append({"label": resolved.get("title") or ref, "key": "", "pages": [],
+        title = re.sub(r"<[^>]+>", "", resolved.get("title") or "").strip()   # Crossref keeps <i> etc.
+        papers.append({"label": title or ref, "key": "", "pages": [],
                        "doi": resolved.get("doi") or "", "fetched": fetched})
 
     def follow(doi, title):
