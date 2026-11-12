@@ -29,8 +29,8 @@ with quotes checked against the source text.
 Install the local sidecar and the plugin, then right-click a collection and
 choose *Ask across this collection*. Steps: [zotero-plugin/README.md](zotero-plugin/README.md#install).
 It needs [Ollama](https://ollama.com) with `gemma4:26b`. On a machine with
-less memory, `gemma4:e4b` with `WYR_OLLAMA_THINK=_merge,_overview,_unfaithful`
-did about as well on the review benchmark and ran faster
+less memory, `gemma4:e4b` (it thinks on the merge, short answer and wording
+check by default) did about as well on the review benchmark and ran faster
 ([results](benchmark/reviews/RESULTS.md)).
 
 ## Use it from an AI assistant (MCP)
@@ -68,9 +68,12 @@ and drop `WYR_USE_BEDROCK`.
 
 ## Tools
 
-- **`verify_claim(claim, reference, expected_title="")`** — verify one claim
+- **`verify_claim(claim, reference, expected_title="", passes=1)`** — verify one claim
   against a DOI / PMID / PMCID / URL. Returns structured fields plus a
-  ready-to-show markdown `card`.
+  ready-to-show markdown `card`. `passes=3` judges three times and takes the
+  majority; `passes=0` does that only when the first result is borderline.
+  A quote that matched the paper only loosely is marked `close_match` and
+  shown as "close match: wording differs from the paper".
 - **`score_answer(claims, min_confidence=0.0)`** — `claims` is a list of
   `{claim, reference}`. Verifies each, then returns an overall confidence score
   and a ranked **"worth your read"** source list; `min_confidence` screens out
@@ -94,6 +97,12 @@ and drop `WYR_USE_BEDROCK`.
   trail, and every reference's verdict (discovered ones flagged).
 - **`plan_search(question, answers=None)`** — clarify-then-optimize: returns
   clarifying questions, then (with answers) an optimized search plan.
+- **`ask_papers(question, references=None, max_papers=6, depth="standard")`** —
+  answer a question from several papers (the Zotero *Ask across* engine): every
+  finding is quoted and the quote checked word for word, then merged into
+  claims with the papers behind and against each, plus a short answer.
+  No references: `find_sources` picks them. Slow (a model call per paper), so
+  it runs on the server's backend (API key, Bedrock or Ollama), not sampling.
 
 ## How it works
 
@@ -142,8 +151,9 @@ The judge reaches Claude one of two ways:
    themselves. The local judge reads the abstract plus the claim's best-matching
    passages (`WYR_OLLAMA_FOCUS_CHARS`, default 12000; `0` reads everything);
    quotes are still verified against the full text. Rewriting claims
-   (`revise_claim`) also runs locally. Thinking is off by default;
-   `WYR_OLLAMA_THINK=1` turns it on for every call, or a comma list of steps
+   (`revise_claim`) also runs locally. Thinking is off by default, except that
+   a small gemma (`e2b`/`e4b`) thinks on `_merge,_overview,_unfaithful`;
+   `WYR_OLLAMA_THINK=0` turns it off, `WYR_OLLAMA_THINK=1` turns it on for every call, or a comma list of steps
    (the function that calls the model, e.g. `_merge,_overview,_unfaithful`)
    turns it on only there. `WYR_CALL_LOG=calls.jsonl` logs each local model call:
    step, seconds, tokens, reply and thinking.
@@ -176,6 +186,10 @@ pip install "worth-your-read[web] @ git+https://github.com/fedor-i/WorthTheRead.
 export ANTHROPIC_API_KEY=sk-ant-...   WYR_USE_BEDROCK=0
 uvicorn worth_your_read.web.app:app --reload   # http://127.0.0.1:8000
 ```
+
+Besides verifying claims, it can *ask across papers* (`POST /api/ask`), the
+same engine as the `ask_papers` tool. That takes minutes, so it isn't on the
+static site.
 
 ## Local sidecar (for the Zotero plugin)
 

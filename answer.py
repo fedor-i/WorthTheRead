@@ -93,14 +93,9 @@ def _read_chars(text: str, depth: str) -> int:
 
 
 def _verbatim(quote: str, haystack_alnum: str) -> bool:
-    """The quote is in the paper word for word (ignoring case, punctuation and
-    spacing). A quote joined from pieces with "..." passes only if every piece
-    is. Stricter than judge._quote_verified, which accepts a quote whose start
-    or any ten-word run matches: the model sometimes adds or changes words
-    after a true start, and the answer shows quotes as the paper's own words."""
-    pieces = [_judge._norm_alnum(p) for p in re.split(r"\.\.\.|…", quote)]
-    pieces = [p for p in pieces if p]
-    return bool(pieces) and len(" ".join(pieces)) >= 12 and all(f" {p} " in f" {haystack_alnum} " for p in pieces)
+    """The quote is in the paper word for word (see judge.verbatim): the answer
+    shows quotes as the paper's own words."""
+    return _judge.verbatim(quote, haystack_alnum)
 
 
 def ask(question: str, fetched: dict, check: bool = False, depth: str = "standard") -> dict:
@@ -304,9 +299,9 @@ same place or region, population, nutrient and outcome; "none" if it is about a 
 different region, organism or result, or only on the same topic. For "part", \
 copy the words of the sentence that it backs, exactly as they appear.
 
-Return ONLY a JSON object: {"findings": [{"id": "C1", "backs": "all"}, \
-{"id": "C2", "backs": "part", "part": "exact words from the sentence"}, \
-{"id": "C3", "backs": "none"}]}"""
+List only the findings that back it; leave out the rest. Return ONLY a JSON \
+object: {"all": ["C1"], "part": [{"id": "C2", "part": "exact words from the \
+sentence"}]} — empty lists if none do."""
 
 
 def _supporting_parts(sentence: str, found: list, ids: set) -> tuple:
@@ -321,6 +316,11 @@ def _supporting_parts(sentence: str, found: list, ids: set) -> tuple:
                                 max_tokens=600))
     except Exception:
         return ids, {}
+    # Short form: {"all": [ids], "part": [{id, part}]}; the long form, one entry
+    # per finding with "backs", is still read.
+    if isinstance(data.get("all"), list) or isinstance(data.get("part"), list):
+        data = {"findings": [{"id": x, "backs": "all"} for x in data.get("all") or []]
+                + [dict(f, backs="part") for f in data.get("part") or [] if isinstance(f, dict)]}
     if not isinstance(data.get("findings"), list):
         return ids, {}
     keep, parts = set(), {}
@@ -353,9 +353,9 @@ gives a different value of the same specific point (another site, domain, \
 mechanism, direction or result for the same thing). A finding that adds \
 another factor, works alongside, gives more detail, or says something is \
 still unknown does not contradict.
-- "neither" otherwise.
-Return ONLY a JSON object: {"point": "...", "findings": [{"id": "F1", "says": \
-"agrees"}, {"id": "F2", "says": "contradicts"}, {"id": "F3", "says": "neither"}]}"""
+- neither otherwise: leave it out.
+Return ONLY a JSON object listing the findings that agree and that contradict: \
+{"point": "...", "agrees": ["F2"], "contradicts": ["F5"]} — empty lists if none."""
 
 
 def _vote(text: str, found: list, ids: set) -> tuple:
@@ -371,11 +371,15 @@ def _vote(text: str, found: list, ids: set) -> tuple:
         return set(), set()
     listing = "\n".join(f"F{k} {found[i][1]}" for k, i in enumerate(cand, 1))
     try:
-        data = _parse(_complete(_VOTE_SYSTEM, f"CLAIM:\n{text}\n\nFINDINGS:\n{listing}", max_tokens=60 * len(cand) + 100))
+        data = _parse(_complete(_VOTE_SYSTEM, f"CLAIM:\n{text}\n\nFINDINGS:\n{listing}", max_tokens=20 * len(cand) + 200))
     except Exception:
         return set(), set()
     agree, against = set(), set()
-    for f in data.get("findings") or []:
+    # Short form: {"agrees": [ids], "contradicts": [ids]}; the long form, one
+    # entry per finding with "says", is still read.
+    short = [{"id": x, "says": k} for k in ("agrees", "contradicts") for x in data.get(k) or []
+             if isinstance(data.get(k), list)]
+    for f in short or data.get("findings") or []:
         m = re.search(r"\d+", str(f.get("id", ""))) if isinstance(f, dict) else None
         if m and 1 <= int(m.group(0)) <= len(cand):
             says = str(f.get("says", "")).lower()

@@ -75,3 +75,17 @@ async def api_score(req: ScoreReq):
     summary["card"] = _render.render_scorecard(summary)
     summary["claims"] = results
     return summary
+
+
+class AskReq(BaseModel):
+    question: str
+    references: list[str] = []
+    max_papers: int = 6
+    depth: str = "standard"
+
+
+@app.post("/api/ask")
+def api_ask(req: AskReq):
+    """Answer a question from several papers, each finding quoted and checked
+    word for word (slow: a model call per paper). No references: find them."""
+    return _server.ask_across(req.question, req.references, req.max_papers, req.depth)

@@ -240,6 +240,14 @@ function quoteVerified(quote, hay) {
   }
   return false;
 }
+// Word for word (ignoring case, punctuation and spacing; "..." pieces each).
+// A quote that only passed quoteVerified's looser tests is shown as a close match.
+const normAlnum = (s) => norm(s).replace(/[^a-z0-9]+/g, " ").trim();
+function verbatim(quote, hayAlnum) {
+  const pieces = (quote || "").split(/\.\.\.|…/).map(normAlnum).filter(Boolean);
+  return pieces.length > 0 && pieces.join(" ").length >= 12 && pieces.every(p => ` ${hayAlnum} `.includes(` ${p} `));
+}
+const CLOSE = ' <small class="close">(close match: wording differs from the paper)</small>';
 const band = (c) => c >= 0.75 ? "High" : c >= 0.45 ? "Med" : "Low";
 const DISTORTION_LABELS = { none:"none", correlation_causation:"correlation→causation", animal_to_human:"animal→human",
   dropped_caveats:"dropped caveats", effect_size_spin:"effect-size spin", cherry_picking:"cherry-picking", other:"other" };
@@ -251,6 +259,7 @@ const DISTORTION_LABELS = { none:"none", correlation_causation:"correlation→ca
 const CORE_TYPES = new Set(["outcome", "direction"]);
 const VERDICT_CEIL = { SUPPORTED: 1.0, OVERSTATED: 0.6, UNSUPPORTED: 0.9, INSUFFICIENT: 0.4 };
 function checkAspects(aspects, hay) {
+  const hayAlnum = normAlnum(hay);
   return (aspects || []).map(a => {
     const st = (a.status || "").toUpperCase();
     const q = a.quote || "";
@@ -258,7 +267,7 @@ function checkAspects(aspects, hay) {
     // an ENTAILED/CONTRADICTED aspect whose quote can't be verified falls to ABSENT
     const status = ((st === "ENTAILED" || st === "CONTRADICTED") && !verified) ? "ABSENT" : st;
     return { type: (a.type || "other").toLowerCase(), text: a.text || "",
-             status, quote: verified ? q : "", note: a.note || "" };
+             status, quote: verified ? q : "", close_match: verified && !verbatim(q, hayAlnum), note: a.note || "" };
   });
 }
 function deriveFromAspects(checked) {
@@ -282,7 +291,11 @@ function deriveFromAspects(checked) {
 function finalize(data, fetched) {
   const hay = norm(fetched.full_text);
   const verified = [];
-  for (const ev of (data.evidence || [])) { ev.verified = quoteVerified(ev.quote, hay); if (ev.verified) verified.push(ev); }
+  const hayAlnum = normAlnum(hay);
+  for (const ev of (data.evidence || [])) {
+    ev.verified = quoteVerified(ev.quote, hay);
+    if (ev.verified) { ev.close_match = !verbatim(ev.quote, hayAlnum); verified.push(ev); }
+  }
   const aspects = checkAspects(data.aspects, hay);
   const aspectQuotesVerified = aspects.filter(a => a.quote).length;
   const r = {
@@ -969,10 +982,10 @@ function cardHTML(r, hideClaim=false) {
   const ASPECT_ICON = { ENTAILED:"✓", CONTRADICTED:"✗", ABSENT:"—" };
   const asps = r.aspects || [];
   let asp = asps.length ? `<div class="aspects"><div class="meta"><b>Claim breakdown</b> — each piece checked separately:</div>`
-    + asps.map(a => `<div class="aspect ${esc(a.status)}"><span class="achip ${esc(a.status)}">${ASPECT_ICON[a.status]||"?"} ${esc(a.type)}</span> ${esc(a.text)}${a.quote?`<blockquote>“${esc(a.quote)}”</blockquote>`:""}</div>`).join("")
+    + asps.map(a => `<div class="aspect ${esc(a.status)}"><span class="achip ${esc(a.status)}">${ASPECT_ICON[a.status]||"?"} ${esc(a.type)}</span> ${esc(a.text)}${a.quote?`<blockquote>“${esc(a.quote)}”${a.close_match?CLOSE:""}</blockquote>`:""}</div>`).join("")
     + `</div>` : "";
   // Aspects already carry the verified quotes; only show the separate evidence block when there's no decomposition.
-  let ev = asps.length ? "" : (r.evidence||[]).slice(0,3).map(e => `<blockquote>“${esc(e.quote)}”${e.section?` — §${esc(e.section)}`:""}</blockquote>`).join("");
+  let ev = asps.length ? "" : (r.evidence||[]).slice(0,3).map(e => `<blockquote>“${esc(e.quote)}”${e.section?` — §${esc(e.section)}`:""}${e.close_match?CLOSE:""}</blockquote>`).join("");
   let why = r.rationale ? `<p class="meta"><b>Why:</b> ${esc(r.rationale)}</p>` : "";
   let dist = (r.verdict==="OVERSTATED" && r.distortion_note) ? `<p><span class="tag">${esc(DISTORTION_LABELS[r.distortion_type]||r.distortion_type)}</span> ${esc(r.distortion_note)}</p>` : "";
   let unmet = (r.claim_aspects_unmet||[]).length ? `<p class="meta"><b>Not established:</b> ${esc(r.claim_aspects_unmet.join("; "))}</p>` : "";

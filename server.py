@@ -29,6 +29,8 @@ from . import render as _render
 from . import plan as _plan
 from . import discover as _discover
 from . import audit as _audit
+from . import answer as _answer
+from . import research as _research
 
 mcp = FastMCP("worth-your-read", instructions=(
     "Verify scientific claims against the papers they cite, grounded in the "
@@ -46,7 +48,9 @@ mcp = FastMCP("worth-your-read", instructions=(
     "4. audit_paper(reference) — check a paper's own introduction against the "
     "sources it cites (fix=True also suggests replacements).\n"
     "5. find_sources(query) discovers papers; plan_search scopes a question "
-    "before verifying."))
+    "before verifying.\n"
+    "6. ask_papers(question, references) answers a question from several "
+    "papers, each finding quoted and checked word for word (slow)."))
 
 
 async def _run_judge(ctx, claim: str, fetched: dict) -> dict:
@@ -130,7 +134,16 @@ def _reconcile(results: list) -> dict:
 
 async def _judge_consistent(ctx, claim: str, fetched: dict, passes: int) -> dict:
     """Run the judge `passes` times and reconcile — self-consistency to remove
-    the run-to-run ambiguity on borderline claims."""
+    the run-to-run ambiguity on borderline claims. passes=0 is "auto": judge
+    once, and only a borderline result (not High confidence, or OVERSTATED,
+    where the judge varies most) is judged twice more and put to the vote."""
+    if passes == 0:
+        first = await _run_judge(ctx, claim, fetched)
+        if first.get("judge_backend") in ("none", "n/a", None) or (
+                first.get("band") == "High" and first.get("verdict") != "OVERSTATED"):
+            return first
+        results = [first] + [await _run_judge(ctx, claim, fetched) for _ in range(2)]
+        return _reconcile(results)
     passes = max(1, min(5, passes))
     if passes == 1:
         return await _run_judge(ctx, claim, fetched)
@@ -240,6 +253,8 @@ async def verify_claim(claim: str, reference: str = "", expected_title: str = ""
         passes: self-consistency — judge this many times (odd, e.g. 3) and take
             the majority verdict, to remove run-to-run ambiguity on borderline
             claims; confidence drops when the passes disagree. Default 1.
+            0 = auto: judge once, and three times only when the first result
+            is borderline (not High confidence, or OVERSTATED).
         html: also return an `html` field — a self-contained, styled page of the
             verdict with verified quotes and links to the full text, to open or
             share. Off by default so the response stays compact.
@@ -677,6 +692,68 @@ async def audit_paper(reference: str, max_claims: int = 8,
         out["summary"] = out.get("note", "Could not audit this paper.")
     out["card"] = _audit._render(out)
     return out
+
+
+def ask_across(question: str, references: list = None, max_papers: int = 6,
+               depth: str = "standard", progress=None) -> dict:
+    """Answer a question from several papers (answer.ask_many): each paper is
+    read, its findings quoted and checked word for word, then merged into a
+    few claims with their sources and a short answer. With no references, the
+    top `max_papers` papers find_sources returns for the question are read."""
+    refs = [r for r in (references or []) if str(r).strip()]
+    if not refs:
+        refs = [s["doi"] for s in find_sources(question, limit=max_papers)["sources"] if s.get("doi")]
+    papers, left_out = [], []
+    for ref in refs:
+        try:
+            resolved = _resolve.resolve(ref)
+            fetched = _fetch.fetch_text(resolved)
+        except Exception as e:
+            left_out.append({"label": ref, "key": "", "reason": f"load_failed: {type(e).__name__}"})
+            continue
+        papers.append({"label": resolved.get("title") or ref, "key": "", "pages": [],
+                       "doi": resolved.get("doi") or "", "fetched": fetched})
+
+    def follow(doi, title):
+        return {"label": title or doi, "key": "", "doi": doi, "pages": [],
+                "fetched": _fetch.fetch_text(_resolve.resolve(doi, title or None))}
+    _research.add_paper_facts(papers)          # citation counts pick papers; reviews don't vote
+    r = _answer.ask_many(question, papers, progress=progress, max_papers=max_papers or None,
+                         follow=follow, depth=depth if depth in _answer.DEPTHS else "standard")
+    r["skipped"] = [x["label"] for x in left_out] + r["skipped"]
+    r["left_out"] = left_out + r["left_out"]
+    r["summary"] = _render.ask_summary(r)
+    return r
+
+
+@mcp.tool()
+async def ask_papers(question: str, references: list = None, max_papers: int = 6,
+                     depth: str = "standard", ctx: Context = None) -> dict:
+    """Answer a research question from several papers at once, with every
+    finding quoted from a paper and the quote checked word for word.
+
+    Each paper is read for what it says on the question; the findings are
+    merged into a few claims, each listing the papers (and quotes) behind it,
+    the papers that disagree, and a short answer on top. Claims no quote backs
+    are marked UNGROUNDED; numbers no quote contains are flagged.
+
+    Slow: one model call per paper plus a few to merge, so it runs on the
+    server's own backend (ANTHROPIC_API_KEY, Bedrock or a local Ollama model),
+    not through this chat.
+
+    Args:
+        question: the research question.
+        references: DOIs / PMIDs / URLs to read. Empty: find_sources picks them.
+        max_papers: read at most this many (the most relevant to the question).
+        depth: "quick", "standard" or "deep" (deep also reads key papers the
+            chosen ones' introductions cite).
+    """
+    import asyncio
+    try:
+        return await asyncio.to_thread(ask_across, question, references, max_papers, depth)
+    except Exception as e:
+        return {"question": question, "error": f"{type(e).__name__}: {e}",
+                "summary": "Couldn't answer: " + str(e)}
 
 
 @mcp.tool()

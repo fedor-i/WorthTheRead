@@ -218,6 +218,17 @@ def _quote_verified(quote: str, haystack_norm: str) -> bool:
     return False
 
 
+def verbatim(quote: str, haystack_alnum: str) -> bool:
+    """The quote is in the paper word for word (ignoring case, punctuation and
+    spacing); pieces joined with "..." must each be. Stricter than
+    _quote_verified, which also accepts a quote whose start, a ten-word run or
+    80% of its words match: such a quote counts as evidence but is shown as a
+    close match, not as the paper's own words."""
+    pieces = [_norm_alnum(p) for p in re.split(r"\.\.\.|…", quote or "")]
+    pieces = [p for p in pieces if p]
+    return bool(pieces) and len(" ".join(pieces)) >= 12 and all(f" {p} " in f" {haystack_alnum} " for p in pieces)
+
+
 def band(conf: float) -> str:
     return "High" if conf >= 0.75 else "Med" if conf >= 0.45 else "Low"
 
@@ -325,7 +336,7 @@ _VERDICT_CEIL = {"SUPPORTED": 1.0, "OVERSTATED": 0.6,
 
 
 def _check_aspects(aspects: list, haystack_norm: str) -> list:
-    checked = []
+    checked, hay_alnum = [], _norm_alnum(haystack_norm)
     for a in aspects or []:
         if not isinstance(a, dict):
             continue  # the model occasionally emits a bare string in the list
@@ -339,6 +350,7 @@ def _check_aspects(aspects: list, haystack_norm: str) -> list:
             "text": a.get("text", ""),
             "status": st,
             "quote": quote if verified else "",
+            "close_match": bool(verified) and not verbatim(quote, hay_alnum),
             "note": a.get("note", ""),
         })
     return checked
@@ -434,11 +446,12 @@ def finalize(data: dict, fetched: dict, claim: str = "") -> dict:
     """Apply the quote-verification guard + aspect-derived verdict + confidence
     caps to a raw judgement (from any backend) and return the normalized dict."""
     haystack = _norm(fetched.get("full_text", ""))
-    verified = []
+    verified, hay_alnum = [], _norm_alnum(haystack)
     for ev in data.get("evidence", []) or []:
         ok = _quote_verified(ev.get("quote", ""), haystack)
         ev["verified"] = ok
         if ok:
+            ev["close_match"] = not verbatim(ev.get("quote", ""), hay_alnum)
             verified.append(ev)
 
     aspects = _check_aspects(data.get("aspects"), haystack)

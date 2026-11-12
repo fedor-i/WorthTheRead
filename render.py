@@ -16,6 +16,11 @@ _PLAIN = {"SUPPORTED": "the source supports this claim",
           "INSUFFICIENT": "can't be verified from the available text"}
 
 
+# A quote that matched the paper only loosely (its start, a long run, or most
+# of its words): it counts as evidence, but it isn't the paper's exact wording.
+_CLOSE_MD = " *(close match: wording differs from the paper)*"
+_CLOSE_HTML = ' <small class="close">(close match: wording differs from the paper)</small>'
+
 def _first_sentence(text: str, cap: int = 220) -> str:
     text = (text or "").strip()
     if not text:
@@ -37,6 +42,31 @@ def summary(r: dict) -> str:
     elif v == "SUPPORTED" and not r.get("has_fulltext", r.get("has_results")):
         extra = " (abstract-level)"
     return f"{v} · {band} confidence — {_PLAIN.get(v, v)}{extra}."
+
+
+def ask_summary(r: dict) -> str:
+    """Markdown for an ask-across-papers result: the short answer, the merged
+    claims with the papers behind them, and the papers read."""
+    if r.get("error"):
+        return "Couldn't answer: " + r["error"]
+    refs = lambda c: "".join(f" [{n}]" for n in sorted({s["paper"] for s in c.get("sources", [])}))
+    flag = lambda c: (" *(no quote backs this)*" if c.get("status") != "GROUNDED" else "") + \
+        (f" *(numbers not in any quote: {', '.join(c['unsourced_numbers'])})*" if c.get("unsourced_numbers") else "")
+    lines = [f"**{r.get('question', '')}**", ""]
+    if r.get("overview"):
+        lines += [" ".join(c["claim"] + refs(c) for c in r["overview"]), ""]
+    for c in r.get("claims", []):
+        against = sorted({s["paper"] for s in c.get("against", [])})
+        lines.append(f"- {c['claim']}{refs(c)}{flag(c)}"
+                     + (f" — disputed by {', '.join(f'[{n}]' for n in against)}" if against else ""))
+    if r.get("not_addressed"):
+        lines += ["", "**Not addressed:** " + "; ".join(r["not_addressed"])]
+    if r.get("papers"):
+        lines += ["", "**Papers read**"] + [f"{p['n']}. {p['label']}" + (" (abstract only)" if p.get("abstract_only") else "")
+                                            + ("" if p.get("used") else " (nothing used)") for p in r["papers"]]
+    if r.get("skipped"):
+        lines += ["", f"Not read: {len(r['skipped'])} paper(s)."]
+    return "\n".join(lines)
 
 
 def _linkage_line(r: dict):
@@ -82,13 +112,13 @@ def render_card(r: dict) -> str:
         icon = {"ENTAILED": "✓", "CONTRADICTED": "✗", "ABSENT": "—"}
         lines.append("**Checked.** " + " · ".join(
             f"{icon.get(a.get('status'), '?')} {a.get('type', '')}" for a in asps))
-        quote = next((a["quote"] for a in asps if a.get("quote")), None)
-        if quote:
-            lines.append(f"> “{quote}”")
+        a = next((a for a in asps if a.get("quote")), None)
+        if a:
+            lines.append(f"> “{a['quote']}”" + _CLOSE_MD * bool(a.get("close_match")))
     else:
         ev = r.get("evidence") or []
         if ev and ev[0].get("quote"):
-            lines.append(f"> “{ev[0]['quote']}”")
+            lines.append(f"> “{ev[0]['quote']}”" + _CLOSE_MD * bool(ev[0].get("close_match")))
 
     if r.get("verdict") == "OVERSTATED" and r.get("distortion_note"):
         d = DISTORTION_LABELS.get(r.get("distortion_type"),
@@ -129,6 +159,7 @@ padding:24px 16px}.wrap{max-width:780px;margin:0 auto}
 .aspects li{margin:2px 0}.ent{color:#1a7f37}.con{color:#c01c28}.abs{color:var(--muted)}
 blockquote{margin:8px 0;padding:8px 12px;background:var(--quote);border-left:3px solid var(--border);
 border-radius:0 6px 6px 0;font-size:14px}
+blockquote .close{color:var(--muted)}
 .why{font-size:13.5px;color:var(--fg);margin:8px 0 0}.gap{font-size:13px;color:var(--muted);margin:6px 0 0}
 h1{font-size:20px;margin:0 0 4px}.overall{font-size:14px;color:var(--muted);margin:0 0 18px}
 .wyr{padding-left:20px}.wyr li{margin:6px 0}
@@ -195,13 +226,13 @@ def verdict_html(r: dict, fragment: bool = False) -> str:
             line = (f'<span class="{cls}">{_STATUS_ICON.get(st,"?")} '
                     f'{_esc(a.get("type",""))}</span> — {_esc(a.get("text",""))}')
             if a.get("quote"):
-                line += f'<blockquote>“{_esc(a["quote"])}”</blockquote>'
+                line += f'<blockquote>“{_esc(a["quote"])}”{_CLOSE_HTML * bool(a.get("close_match"))}</blockquote>'
             p.append(f"<li>{line}</li>")
         p.append("</ul>")
     else:
         ev = r.get("evidence") or []
         if ev and ev[0].get("quote"):
-            p.append(f'<blockquote>“{_esc(ev[0]["quote"])}”</blockquote>')
+            p.append(f'<blockquote>“{_esc(ev[0]["quote"])}”{_CLOSE_HTML * bool(ev[0].get("close_match"))}</blockquote>')
 
     if v == "OVERSTATED" and r.get("distortion_note"):
         d = DISTORTION_LABELS.get(r.get("distortion_type"),

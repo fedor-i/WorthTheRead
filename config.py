@@ -1,5 +1,6 @@
 """Central configuration, read from the environment with sane defaults."""
 import os
+import re
 
 # Model used by the judge. Overridable so you can flip to a stronger model for
 # hard cases without touching code.
@@ -30,9 +31,9 @@ BEDROCK_MODEL = os.environ.get("WYR_BEDROCK_MODEL", "").strip()
 # When WYR_USE_OLLAMA is truthy, the judge runs on a LOCAL Ollama model instead
 # of Claude. The Python quote-verification guard (judge.finalize) is identical
 # whichever backend produced the raw judgement, so a small local model stays
-# safe against fabricated support. NOTE: gemma "thinking" models MUST run with
-# think=false (judge._ollama_chat sets it) or they spend the whole token budget
-# on hidden reasoning and return empty content.
+# safe against fabricated support. Thinking is off unless WYR_OLLAMA_THINK turns
+# it on (below); when on, each call gets extra tokens so the reasoning doesn't
+# eat the answer.
 USE_OLLAMA = _truthy(os.environ.get("WYR_USE_OLLAMA", ""))
 OLLAMA_URL = os.environ.get("WYR_OLLAMA_URL", "http://localhost:11434").rstrip("/")
 OLLAMA_MODEL = os.environ.get("WYR_OLLAMA_MODEL", "gemma4:e4b")
@@ -43,7 +44,11 @@ OLLAMA_TIMEOUT = float(os.environ.get("WYR_OLLAMA_TIMEOUT", "600"))
 # out of num_predict, so each call gets this many more on top.
 # WYR_OLLAMA_THINK=1 thinks on every call; a comma list of steps (the function
 # that calls the model, e.g. "_merge,_vote") thinks only there.
-_think = os.environ.get("WYR_OLLAMA_THINK", "").strip()
+# Unset, a small gemma (e2b/e4b) thinks on the three steps it needs: without
+# it, its merge is vague, its short answer can come back empty and its wording
+# check flags nitpicks (benchmark/reviews/RESULTS.md). Larger models don't.
+SMALL_MODEL_THINK = "_merge,_overview,_unfaithful"
+_think = os.environ.get("WYR_OLLAMA_THINK", SMALL_MODEL_THINK if re.search(r":e\d+b", OLLAMA_MODEL) else "").strip()
 OLLAMA_THINK = _think.lower() in ("1", "true", "yes", "on")
 OLLAMA_THINK_STEPS = set() if OLLAMA_THINK or _think.lower() in ("", "0", "false", "no", "off") else {x.strip() for x in _think.split(",") if x.strip()}
 OLLAMA_THINK_TOKENS = int(os.environ.get("WYR_OLLAMA_THINK_TOKENS", "4000"))

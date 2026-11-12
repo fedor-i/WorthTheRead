@@ -837,3 +837,63 @@ def test_thinking_can_be_on_for_some_steps_only(monkeypatch):
     answer._merge("q?", [{"label": "a"}, {"label": "b"}], found, [(found[0][1], {0}), (found[1][1], {1})])
     assert [b["think"] for b in sent] == [False, True]
     assert sent[1]["options"]["num_predict"] == 2000 + answer.config.OLLAMA_THINK_TOKENS
+
+
+def test_a_loosely_matched_quote_counts_but_is_marked_a_close_match():
+    exact = judge.finalize(_supported(), _fetched(), "claims are likely false")
+    assert exact["evidence"][0]["close_match"] is False and exact["aspects"][0]["close_match"] is False
+    # a true start with other words after it: still evidence, but not the paper's wording
+    loose = QUOTE + " in almost every field of modern biomedical science today"
+    r = judge.finalize(_supported(loose), _fetched(), "claims are likely false")
+    assert r["evidence"][0]["close_match"] is True and r["aspects"][0]["close_match"] is True
+    from worth_your_read import render
+    assert "close match" in render.render_card(dict(r, resolved={}, claim="c", reference="r"))
+
+
+def test_vote_and_support_read_the_short_replies(monkeypatch):
+    found = [(1, "OCP binds via its N-terminal domain", ["q1"]),
+             (2, "The N-terminal domain binds the core", ["q2"]),
+             (3, "Light turns OCP red", ["q3"])]
+    monkeypatch.setattr(answer, "_complete", lambda s, u, max_tokens=0: json.dumps(
+        {"point": "domain", "agrees": ["F1"], "contradicts": []}))
+    agree, against = answer._vote("OCP binds via its N-terminal domain", found, {0})
+    assert agree == {1} and against == set()
+    monkeypatch.setattr(answer, "_complete", lambda s, u, max_tokens=0: json.dumps(
+        {"all": ["C1"], "part": [{"id": "C2", "part": "binds the core"}]}))
+    keep, parts = answer._supporting_parts("OCP binds the core and turns red", found, {0, 1, 2})
+    assert keep == {0, 1} and parts == {1: "binds the core"}
+
+
+def test_auto_passes_rejudge_only_borderline_results(monkeypatch):
+    import asyncio
+    from worth_your_read import server
+    calls = []
+
+    def fake(results):
+        async def run(ctx, claim, fetched):
+            calls.append(1)
+            return dict(results[len(calls) - 1], judge_backend="api")
+        return run
+    monkeypatch.setattr(server, "_run_judge", fake([{"verdict": "SUPPORTED", "band": "High", "confidence": 0.9}]))
+    assert asyncio.run(server._judge_consistent(None, "c", {}, 0))["verdict"] == "SUPPORTED" and len(calls) == 1
+    calls.clear()
+    monkeypatch.setattr(server, "_run_judge", fake([{"verdict": "OVERSTATED", "band": "Med", "confidence": 0.6},
+                                                    {"verdict": "SUPPORTED", "band": "High", "confidence": 0.8},
+                                                    {"verdict": "OVERSTATED", "band": "Med", "confidence": 0.6}]))
+    r = asyncio.run(server._judge_consistent(None, "c", {}, 0))
+    assert len(calls) == 3 and r["verdict"] == "OVERSTATED" and r["passes"] == 3
+
+
+def test_ask_summary_lists_claims_with_their_papers():
+    from worth_your_read import render
+    r = {"question": "How does OCP quench?",
+         "overview": [{"claim": "OCP binds the core.", "sources": [{"paper": 2}]}],
+         "claims": [{"claim": "OCP binds the core.", "status": "GROUNDED", "sources": [{"paper": 2}],
+                     "against": [{"paper": 1}], "unsourced_numbers": []},
+                    {"claim": "It takes 5 s.", "status": "UNGROUNDED", "sources": [], "unsourced_numbers": ["5"]}],
+         "papers": [{"n": 1, "label": "A", "used": False}, {"n": 2, "label": "B", "used": True}],
+         "skipped": [], "not_addressed": []}
+    text = render.ask_summary(r)
+    assert "OCP binds the core. [2] — disputed by [1]" in text
+    assert "no quote backs this" in text and "numbers not in any quote: 5" in text
+    assert "1. A (nothing used)" in text

@@ -102,6 +102,18 @@
     </div>
   </div>
 
+  <!-- 3. ASK -->
+  <div class="panel">
+    <h2>3 · Ask across papers <span class="muted small">(slow: one model call per paper)</span></h2>
+    <p class="muted small">Answers the research question above from several papers. Every finding is quoted from a paper and the quote checked word for word.</p>
+    <label>Papers to read <span class="muted small">(DOI / PMID / URL, one per line; empty: find them)</span></label>
+    <textarea id="askRefs" placeholder="10.1038/..."></textarea>
+    <div style="margin-top:10px">
+      <button id="askBtn">Ask</button>
+      <span class="status" id="askStatus"></span>
+    </div>
+  </div>
+
   <!-- RESULTS -->
   <div id="results"></div>
 </div>
@@ -203,7 +215,7 @@ function verdictCard(r){
     h += `<div class="meta"><b>Paper:</b> ${cite}${res.year?` (${esc(res.year)})`:""}</div>`;
   }
   (r.evidence||[]).slice(0,3).forEach(e=>{
-    h += `<div class="quote">“${esc(e.quote)}”${e.section?` <span class="sec">— §${esc(e.section)}</span>`:""}</div>`;
+    h += `<div class="quote">“${esc(e.quote)}”${e.section?` <span class="sec">— §${esc(e.section)}</span>`:""}${e.close_match?` <span class="sec">(close match: wording differs from the paper)</span>`:""}</div>`;
   });
   if(v==="OVERSTATED" && r.distortion_note){
     h += `<div><span class="tag">${esc(DIST[r.distortion_type]||r.distortion_type||"overstated")}</span> <span class="small">${esc(r.distortion_note)}</span></div>`;
@@ -252,6 +264,37 @@ $("#verifyBtn").onclick = async () => {
     $("#results").appendChild(out);
   }catch(e){ $("#verifyStatus").textContent=e.message; }
   finally{ $("#verifyBtn").disabled=false; }
+};
+
+$("#askBtn").onclick = async () => {
+  const question=$("#question").value.trim();
+  if(!question){ $("#askStatus").textContent="write a research question in step 1"; return; }
+  const references=$("#askRefs").value.split(/\n+/).map(x=>x.trim()).filter(Boolean);
+  $("#askBtn").disabled=true; $("#askStatus").textContent="reading papers… (minutes)";
+  $("#results").innerHTML="";
+  try{
+    const r = await post("/api/ask",{question, references});
+    $("#askStatus").textContent="";
+    const out = el("div","panel");
+    const refs = c => [...new Set((c.sources||[]).map(s=>s.paper))].sort((a,b)=>a-b).map(n=>`[${n}]`).join("");
+    if((r.overview||[]).length) out.appendChild(el("div","overall",r.overview.map(c=>esc(c.claim)+" "+refs(c)).join(" ")));
+    (r.claims||[]).forEach(c=>{
+      const card=el("div","card");
+      let h=`<div>${esc(c.claim)} <span class="pill">${refs(c)||"no quote"}</span></div>`;
+      if((c.against||[]).length) h+=`<div class="small muted">Disputed by ${[...new Set(c.against.map(s=>s.paper))].map(n=>`[${n}]`).join("")}</div>`;
+      if((c.unsourced_numbers||[]).length) h+=`<div class="small muted">Numbers not in any quote: ${esc(c.unsourced_numbers.join(", "))}</div>`;
+      (c.sources||[]).slice(0,3).forEach(s=>{ h+=`<div class="quote">“${esc(s.quote)}” <span class="sec">— [${s.paper}]</span></div>`; });
+      card.innerHTML=h; out.appendChild(card);
+    });
+    if((r.papers||[]).length){
+      const ol=el("ol","wyr");
+      r.papers.forEach(p=>ol.appendChild(el("li",null,esc(p.label)+(p.abstract_only?' <span class="pill">abstract only</span>':"")+(p.used?"":' <span class="pill">nothing used</span>'))));
+      out.appendChild(el("h2",null,"Papers read")); out.appendChild(ol);
+    }
+    if(r.error) out.appendChild(el("p","muted",esc(r.error)));
+    $("#results").appendChild(out);
+  }catch(e){ $("#askStatus").textContent=e.message; }
+  finally{ $("#askBtn").disabled=false; }
 };
 </script>
 </body>

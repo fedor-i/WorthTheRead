@@ -70,6 +70,7 @@ of those in the papers read (OCP 12, ferroptosis 11), judged by Claude Opus 4.5:
 |---|---|---|---|---|---|---|
 | OCP | 26b | 979 s | 7 | 5 | 4 | 33% |
 | OCP | e4b | 805 s | 5 | 4 | 2 | 42% |
+| OCP | e4b, defaults, short replies (2026-11-12) | 923 s | 6 | 2 | 2 | 55% |
 | ferroptosis | 26b (2026-11-10) | 2102 s | 7 | 6 | 3 | 36% |
 | ferroptosis | e4b | 1534 s | 7 | 6 | 4 | 55% |
 
@@ -84,3 +85,9 @@ of those in the papers read (OCP 12, ferroptosis 11), judged by Claude Opus 4.5:
   every call it was 2.3x slower (OCP 2233 s) and no better.
 - Where 26b's time goes (OCP, from `WYR_CALL_LOG`): reading papers 44%, merge
   32%, vote and support checks 20%; 85% of it is writing output.
+- Short agreement and support replies (2026-11-12): listing only the findings
+  that agree, disagree or back a claim cut those steps to 38 s on OCP (24
+  calls, 1700 output tokens). Their scores stayed within the judge's noise:
+  per statement they moved both ways, including at the findings level, which
+  that change doesn't touch. e4b now thinks on the wording check by default,
+  which adds about 200 s.
