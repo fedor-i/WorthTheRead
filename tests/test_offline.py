@@ -799,3 +799,41 @@ def test_a_quote_shown_as_the_papers_words_must_be_word_for_word():
     assert not answer._verbatim("OCP binds the core ... and the N-terminal domain", hay)
     # a part of a word is not a word
     assert not answer._verbatim("CP binds the core of the phyco", hay)
+
+
+def test_call_log_names_the_step_and_its_tokens(tmp_path, monkeypatch):
+    import io, json as _json, urllib.request
+    reply = {"message": {"content": '{"point": "C-terminal", "findings": []}', "thinking": "hm"},
+             "prompt_eval_count": 900, "prompt_eval_duration": 2e9, "eval_count": 40,
+             "eval_duration": 1e9, "load_duration": 0}
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: io.BytesIO(_json.dumps(reply).encode()))
+    log = tmp_path / "calls.jsonl"
+    monkeypatch.setattr(answer.config, "USE_OLLAMA", True)
+    monkeypatch.setattr(answer.config, "CALL_LOG", str(log))
+    found = [(1, "OCP binds via the C-terminal domain", ["q"]), (2, "OCP binds via the C-terminal domain too", ["q"])]
+    answer._vote("OCP binds the phycobilisome via its C-terminal domain", found, {0})
+    row = _json.loads(log.read_text().splitlines()[0])
+    assert row["step"] == "_vote" and row["prompt_tokens"] == 900 and row["out_tokens"] == 40
+    assert row["out_s"] == 1.0 and row["thinking"] == "hm" and "C-terminal" in row["reply"]
+    # off by default: nothing written
+    monkeypatch.setattr(answer.config, "CALL_LOG", "")
+    answer._vote("OCP binds the phycobilisome via its C-terminal domain", found, {0})
+    assert len(log.read_text().splitlines()) == 1
+
+
+def test_thinking_can_be_on_for_some_steps_only(monkeypatch):
+    import io, json as _json, urllib.request
+    sent = []
+
+    def fake(req, **k):
+        sent.append(_json.loads(req.data))
+        return io.BytesIO(_json.dumps({"message": {"content": "{}"}}).encode())
+    monkeypatch.setattr(urllib.request, "urlopen", fake)
+    monkeypatch.setattr(answer.config, "USE_OLLAMA", True)
+    monkeypatch.setattr(answer.config, "OLLAMA_THINK", False)
+    monkeypatch.setattr(answer.config, "OLLAMA_THINK_STEPS", {"_merge"})
+    found = [(1, "OCP binds via the C-terminal domain", ["q"]), (2, "OCP binds via the C-terminal domain too", ["q"])]
+    answer._vote("OCP binds the phycobilisome via its C-terminal domain", found, {0})
+    answer._merge("q?", [{"label": "a"}, {"label": "b"}], found, [(found[0][1], {0}), (found[1][1], {1})])
+    assert [b["think"] for b in sent] == [False, True]
+    assert sent[1]["options"]["num_predict"] == 2000 + answer.config.OLLAMA_THINK_TOKENS

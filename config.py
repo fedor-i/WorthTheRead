@@ -39,6 +39,17 @@ OLLAMA_MODEL = os.environ.get("WYR_OLLAMA_MODEL", "gemma4:e4b")
 OLLAMA_NUM_CTX = int(os.environ.get("WYR_OLLAMA_NUM_CTX", "20000"))
 OLLAMA_NUM_PREDICT = int(os.environ.get("WYR_OLLAMA_NUM_PREDICT", "1500"))
 OLLAMA_TIMEOUT = float(os.environ.get("WYR_OLLAMA_TIMEOUT", "600"))
+# Let a gemma "thinking" model reason before it answers. Reasoning tokens come
+# out of num_predict, so each call gets this many more on top.
+# WYR_OLLAMA_THINK=1 thinks on every call; a comma list of steps (the function
+# that calls the model, e.g. "_merge,_vote") thinks only there.
+_think = os.environ.get("WYR_OLLAMA_THINK", "").strip()
+OLLAMA_THINK = _think.lower() in ("1", "true", "yes", "on")
+OLLAMA_THINK_STEPS = set() if OLLAMA_THINK or _think.lower() in ("", "0", "false", "no", "off") else {x.strip() for x in _think.split(",") if x.strip()}
+OLLAMA_THINK_TOKENS = int(os.environ.get("WYR_OLLAMA_THINK_TOKENS", "4000"))
+# A file to append one JSON line per local model call: the step that made it,
+# seconds, and Ollama's token counts (plus the thinking text, when on). Off when empty.
+CALL_LOG = os.environ.get("WYR_CALL_LOG", "")
 # Characters of paper text the LOCAL judge reads: the abstract plus the claim's
 # best BM25-matched passages (see focus.py). Smaller is faster; 0 = read it all.
 # Quotes are still verified against the full text either way.

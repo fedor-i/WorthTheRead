@@ -15,6 +15,8 @@ import difflib
 import json
 import os
 import re
+import sys
+import time
 
 from . import config
 from . import focus as _focus
@@ -594,19 +596,23 @@ def _ollama_chat(system: str, user: str, json_mode: bool = True,
                  num_predict: int = None) -> str:
     """Call a local Ollama model's /api/chat and return the message content.
 
-    `think: false` is REQUIRED for gemma "thinking" models — without it they
-    spend the whole num_predict budget on hidden reasoning and return empty
-    content. `format: "json"` asks for a bare JSON object; parse_json_verdict is
+    `think: false` is the default for gemma "thinking" models: with thinking
+    on and no extra budget they spend all of num_predict on hidden reasoning
+    and return empty content. WYR_OLLAMA_THINK turns it on (for every call,
+    or only the steps it lists) and adds OLLAMA_THINK_TOKENS to the budget. `format: "json"` asks for a bare JSON object; parse_json_verdict is
     tolerant of stray prose either way. num_ctx must be large enough to hold the
     paper text (Ollama's default 4096 would truncate it)."""
     import urllib.request
+    step = _step()
+    think = config.OLLAMA_THINK or step in config.OLLAMA_THINK_STEPS
     body = {
         "model": config.OLLAMA_MODEL,
         "stream": False,
-        "think": False,
+        "think": think,
         "options": {"temperature": 0, "seed": 0,     # the same input gives the same answer
                     "num_ctx": config.OLLAMA_NUM_CTX,
-                    "num_predict": num_predict or config.OLLAMA_NUM_PREDICT},
+                    "num_predict": (num_predict or config.OLLAMA_NUM_PREDICT)
+                                   + (config.OLLAMA_THINK_TOKENS if think else 0)},
         "messages": [{"role": "system", "content": system},
                      {"role": "user", "content": user}],
     }
@@ -616,8 +622,43 @@ def _ollama_chat(system: str, user: str, json_mode: bool = True,
         config.OLLAMA_URL + "/api/chat",
         data=json.dumps(body).encode("utf-8"),
         headers={"Content-Type": "application/json"})
+    t = time.time()
     with urllib.request.urlopen(req, timeout=config.OLLAMA_TIMEOUT) as r:
-        return json.loads(r.read()).get("message", {}).get("content", "") or ""
+        reply = json.loads(r.read())
+    if config.CALL_LOG:
+        _log_call(reply, time.time() - t, step)
+    return reply.get("message", {}).get("content", "") or ""
+
+
+def _step() -> str:
+    """The step that is calling the model: the first caller outside the call helpers."""
+    f = sys._getframe(1)
+    while f:
+        if f.f_code.co_name not in ("_step", "_ollama_chat", "_complete"):
+            return f.f_code.co_name
+        f = f.f_back
+    return "?"
+
+
+def _log_call(reply: dict, seconds: float, step: str) -> None:
+    """One line in config.CALL_LOG: which step called the model (the first
+    caller outside the call helpers), how long it took, the tokens read and
+    written, and the reply. Never lets a logging failure break the call."""
+    try:
+        msg = reply.get("message") or {}
+        row = {"step": step, "seconds": round(seconds, 2),
+               "prompt_tokens": reply.get("prompt_eval_count"),
+               "prompt_s": round((reply.get("prompt_eval_duration") or 0) / 1e9, 2),
+               "out_tokens": reply.get("eval_count"),
+               "out_s": round((reply.get("eval_duration") or 0) / 1e9, 2),
+               "load_s": round((reply.get("load_duration") or 0) / 1e9, 2),
+               "out_chars": len(msg.get("content") or ""), "reply": msg.get("content") or ""}
+        if msg.get("thinking"):
+            row["thinking"] = msg["thinking"]
+        with open(config.CALL_LOG, "a") as fh:
+            fh.write(json.dumps(row) + "\n")
+    except Exception:
+        pass
 
 
 def judge_claim_ollama(claim: str, fetched: dict) -> dict:
