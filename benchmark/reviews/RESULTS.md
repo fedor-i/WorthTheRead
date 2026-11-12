@@ -58,3 +58,29 @@ review: OCP findings 58% → 82%, evidence 33% → 45%; ferroptosis findings 40%
   sentences, ferroptosis 20 → 40), so it is now where most is lost.
 - Time doubled: OCP 1010 → 2027 s, ferroptosis 1755 → 4183 s. Another job shared
   the machine during part of the run, so not all of that is ours.
+
+## Update: a small model for phones and small PCs (2026-11-11)
+
+Standard depth, 40 papers per review. gemma4:e4b (6.6 GB) against gemma4:26b
+(17 GB). e4b thinks only in the steps that need judgment:
+`WYR_OLLAMA_THINK=_merge,_overview,_unfaithful`. Statements recovered ("yes"),
+of those in the papers read (OCP 12, ferroptosis 11), judged by Claude Opus 4.5:
+
+| review | model | time | findings | evidence | short | short, yes or partly |
+|---|---|---|---|---|---|---|
+| OCP | 26b | 979 s | 7 | 5 | 4 | 33% |
+| OCP | e4b | 805 s | 5 | 4 | 2 | 42% |
+| ferroptosis | 26b (2026-11-10) | 2102 s | 7 | 6 | 3 | 36% |
+| ferroptosis | e4b | 1534 s | 7 | 6 | 4 | 55% |
+
+- The judge is noisy: two OCP e4b answers with identical findings and evidence
+  scored 8/6 and 5/4, because all three levels are labelled in one prompt. Read
+  differences under about 3 statements as noise.
+- Read by hand, e4b reads papers as well as 26b without thinking; its merge is
+  vaguer (ferroptosis: "autophagy degrades ferritin" where 26b names NCOA4).
+- Thinking matters per step. Off on the short answer, e4b's sentences cited no
+  claims and the short answer came out empty; off on the wording check, it
+  raised 10 flags on OCP, mostly nitpicks (1, a real one, with thinking). On
+  every call it was 2.3x slower (OCP 2233 s) and no better.
+- Where 26b's time goes (OCP, from `WYR_CALL_LOG`): reading papers 44%, merge
+  32%, vote and support checks 20%; 85% of it is writing output.

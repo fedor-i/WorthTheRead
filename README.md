@@ -28,7 +28,10 @@ with quotes checked against the source text.
 
 Install the local sidecar and the plugin, then right-click a collection and
 choose *Ask across this collection*. Steps: [zotero-plugin/README.md](zotero-plugin/README.md#install).
-It needs [Ollama](https://ollama.com) with `gemma4:26b`.
+It needs [Ollama](https://ollama.com) with `gemma4:26b`. On a machine with
+less memory, `gemma4:e4b` with `WYR_OLLAMA_THINK=_merge,_overview,_unfaithful`
+did about as well on the review benchmark and ran faster
+([results](benchmark/reviews/RESULTS.md)).
 
 ## Use it from an AI assistant (MCP)
 
@@ -139,7 +142,11 @@ The judge reaches Claude one of two ways:
    themselves. The local judge reads the abstract plus the claim's best-matching
    passages (`WYR_OLLAMA_FOCUS_CHARS`, default 12000; `0` reads everything);
    quotes are still verified against the full text. Rewriting claims
-   (`revise_claim`) also runs locally.
+   (`revise_claim`) also runs locally. Thinking is off by default;
+   `WYR_OLLAMA_THINK=1` turns it on for every call, or a comma list of steps
+   (the function that calls the model, e.g. `_merge,_overview,_unfaithful`)
+   turns it on only there. `WYR_CALL_LOG=calls.jsonl` logs each local model call:
+   step, seconds, tokens, reply and thinking.
 
 ## Live website (GitHub Pages)
 
