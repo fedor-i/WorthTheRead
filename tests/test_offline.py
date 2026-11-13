@@ -897,3 +897,11 @@ def test_ask_summary_lists_claims_with_their_papers():
     assert "OCP binds the core. [2] — disputed by [1]" in text
     assert "no quote backs this" in text and "numbers not in any quote: 5" in text
     assert "1. A (nothing used)" in text
+
+
+def test_echoed_ids_are_stripped_even_with_a_stray_word():
+    assert answer._strip_ids("OCP senses light [P1, P2, P4, P37, P3 imprints].") == "OCP senses light."
+    assert answer._strip_ids("OCP senses light (C1, C2) [G3].") == "OCP senses light."
+    # a bracket that isn't a list of ids stays
+    assert answer._strip_ids("OCP binds [the core] here") == "OCP binds [the core] here"
+    assert answer._strip_ids("Levels rose [P1 vs P2 in Table 3]") == "Levels rose [P1 vs P2 in Table 3]"

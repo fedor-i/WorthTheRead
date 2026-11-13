@@ -91,3 +91,27 @@ of those in the papers read (OCP 12, ferroptosis 11), judged by Claude Opus 4.5:
   per statement they moved both ways, including at the findings level, which
   that change doesn't touch. e4b now thinks on the wording check by default,
   which adds about 200 s.
+
+## Update: the sealed test reviews (2026-11-12)
+
+First run of both local models on the three test reviews, which no prompt was
+tuned on (senescence, aerosol, long-covid; 30 key statements in the papers
+read), with today's defaults (e4b thinks on merge, short answer and wording
+check). Statements fully present ("yes"), judged by Claude Opus 4.5; "earlier"
+is the committed 26b answer from an older version of the pipeline:
+
+| Run | Time, all three | Findings | Evidence | Short answer | Short, yes or partly |
+|---|---|---|---|---|---|
+| 26b, earlier | 4093 s | 14 | 6 | 1 | 13 |
+| 26b | 3928 s | 11 | 9 | 4 | 11 |
+| e4b | 4297 s | 11 | 4 | 0 | 11 |
+
+- 26b: the merged claims and short answer now carry more of the review
+  (evidence 6 to 9, short answer 1 to 4); findings fell 14 to 11, mostly on
+  aerosol, where 6 of the 40 papers differed and 14 gave no finding.
+- e4b finds as much as 26b in the papers, but its merge loses it: evidence 4
+  against 9, and no statement fully in the short answer. That is the same weak
+  step seen on ferroptosis, now beyond the judge's noise.
+- e4b was not faster here: thinking on the merge was half its time. Its gain is
+  memory, not speed.
+

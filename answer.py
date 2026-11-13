@@ -411,8 +411,10 @@ def _note(t: dict) -> str:
 
 def _strip_ids(text: str) -> str:
     """Drop the ids the model echoes ("[P1, P3]", "[C6]", "(C1, C2)"); the
-    citations come from the ids it listed, not from the text."""
-    return re.sub(r"\s*(?:\[(?:[PCG]\d+[,;\s]*)+\]|\((?:[PCG]\d+[,;\s]*)+\))", "", text).strip()
+    citations come from the ids it listed, not from the text. A bracket of ids
+    may end in a stray word or two ("[P1, P3 imprints]"); it goes too."""
+    return re.sub(r"\s*(?:\[\s*[PCG]\d+(?:[,;\s]+[PCG]\d+)*(?:[,;\s]+[a-z]+(?:\s+[a-z]+)?)?\s*\]"
+                  r"|\((?:[PCG]\d+[,;\s]*)+\))", "", text).strip()
 
 
 # A figure, not a label: skip digits stuck to letters (CO2, Fe3+) and the
