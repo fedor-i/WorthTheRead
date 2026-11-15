@@ -587,6 +587,7 @@ Zotero.WorthYourReadSelfTest = {
             noteText: note.getNote().replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").slice(0, 400) });
         }
       }
+      await delay(2000);   // let the note edit's resync redraw the panel
       log("draftTabText", tabRoot().textContent.slice(0, 1500));
     }
     catch (e) {

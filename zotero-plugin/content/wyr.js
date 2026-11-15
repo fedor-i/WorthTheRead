@@ -1662,6 +1662,8 @@ Zotero.WorthYourRead = {
       row.error = "Couldn't find that sentence in the note any more — it may have been edited.";
     }
     else {
+      // Busy before applied, so nothing reads the old verdict as the new one.
+      row.busy = "Re-checking the new wording…";
       row.revision.applied = true;
       draft.byKey.delete(this.rowKey(row.sentence, row.cited));
       row.sentence = row.revision.text.replace(/[.\s]+$/, "");
@@ -1669,7 +1671,6 @@ Zotero.WorthYourRead = {
       note.setNote(doc.body.innerHTML);
       await note.saveTx();
       // Re-check the new wording against the same source.
-      row.busy = "Re-checking the new wording…";
       this.renderDraft(draft);
       try {
         row.result = await Client.run("verify", { paper: row.paper, claim: row.sentence });
