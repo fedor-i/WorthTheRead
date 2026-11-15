@@ -8,31 +8,40 @@ published no later than the review, so nothing can be copied from it.
 Reviews in reviews.json are split: tune on "tune", and look at "test" only to
 report, so that prompt changes aren't fitted to the scores.
 
-    python benchmark/reviews/run.py load [ID ...]      papers, no model
-    python benchmark/reviews/run.py extract [ID ...]   key statements (Bedrock)
-    python benchmark/reviews/run.py answer [ID ...]    our answer (local model)
-    python benchmark/reviews/run.py score [ID ...]     coverage (Bedrock)
-    python benchmark/reviews/run.py answer --remerge ID   only the steps after reading the
-        papers, from the findings the last `answer` saved in answers/found (fast loop for merge prompts;
-        then score --remerge, table --remerge)
-    python benchmark/reviews/run.py table [--test]     no model
-    python benchmark/reviews/run.py export [ID ...]    the papers we read, for other tools
-    python benchmark/reviews/run.py rival TOOL [ID ...]   score another tool's answer (Bedrock)
+    python benchmark/reviews/run.py load [ID ...]          papers, no model
+    python benchmark/reviews/run.py extract [ID ...]       key statements (Bedrock)
+    python benchmark/reviews/run.py answer [ID ...]        our answer (local model)
+    python benchmark/reviews/run.py score [ID ...]         coverage (Bedrock)
+    python benchmark/reviews/run.py table [--test]         no model; --test reports the test reviews
+    python benchmark/reviews/run.py export [ID ...]        the papers we read, for other tools
+    python benchmark/reviews/run.py rival TOOL [ID ...]    score another tool's answer (Bedrock)
 
 Each key statement gets one label per level of the answer, so a miss shows
 where it was lost: never in the papers read, not read out of them, dropped in
 the merge, or dropped from the short answer. papers/, answers/ and scored/ are
 git-ignored; key/ holds statements in our judge's own words.
 
-`answer --deep` (then `score --deep`, `table --deep`) reads at deep research
-depth, kept apart in answers/deep and scored/deep: it also reads up to
-answer.FOLLOW_PAPERS papers that the chosen papers' introductions cite
-(cites.py). They are older than the review, being cited by papers that are,
-and are saved to papers/ID/followed.json for scoring.
+Flags. --deep and --remerge keep their answers and scores apart, so pass the
+same one to answer, score and table:
+
+    --deep        read at deep research depth, in answers/deep and scored/deep:
+                  also up to answer.FOLLOW_PAPERS papers that the chosen papers'
+                  introductions cite (cites.py). They are older than the review,
+                  being cited by papers that are, and are saved to
+                  papers/ID/followed.json for scoring.
+    --remerge     run only the steps after reading the papers, from the findings
+                  the last `answer` saved in answers/found/ID.json, without the
+                  wording check; in answers/remerge and scored/remerge. A fast
+                  loop for merge prompts.
+    --method=M    answer: combine findings with answer.COMBINE[M] (merge, ranked);
+                  default config.COMBINE
+    --batch=N     answer: findings per merge call (answer.MERGE_BATCH)
+    --top=N       answer: sentences the ranked method writes (answer.RANK_TOP)
+
+--method, --batch and --top write to the same answers/ as a default run.
 """
 import json
 import os
-import re
 import sys
 import time
 
@@ -41,12 +50,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(HERE))))
 
 from worth_your_read import answer, focus, research, sidecar, store  # noqa: E402
 
+_READ_PAPERS = answer._map   # run_answer wraps it to save each review's findings
+
 LOAD_PAPERS = 80       # cited papers fetched, the ones closest to the question
 READ_PAPERS = 40       # as in the OCP run; ask_many ranks them by their full text
-DEPTH = "standard"     # --deep: answer.DEPTHS["deep"], kept apart in answers/deep and scored/deep
-ANSWERS, SCORED = "answers", "scored"
-METHOD = None          # --method=merge|ranked: answer.COMBINE[METHOD]; None is config.COMBINE
-REMERGE = False        # --remerge: reuse answers/found/ID.json, kept apart in answers/remerge and scored/remerge
+DEPTH = "standard"     # --deep: "deep"
+ANSWERS, SCORED = "answers", "scored"   # --deep, --remerge: a subfolder of each
+METHOD = None          # --method=: a key of answer.COMBINE; None is config.COMBINE
+REMERGE = False        # --remerge: replay from answers/found/ID.json
 KEY_STATEMENTS = 12
 PASSAGES = 8           # per statement, for "is it in the papers read at all"
 LEVELS = ("reachable", "findings", "evidence", "short")
@@ -151,15 +162,16 @@ def run_answer(r: dict) -> None:
         followed.append({"label": title or doi, "key": doi, "fetched": got, "pages": pages})
         return followed[-1]
     if REMERGE:
-        # Replay: the papers' findings as saved, so only the steps after them run.
-        got = _read("answers", "found", f"{r['id']}.json")
-        answer._map = lambda *a, **k: (got["found"], got["gaps"], got["papers"])
+        # Replay the papers' findings as saved, so only the steps after them run.
+        found = _read("answers", "found", f"{r['id']}.json")
+        answer._map = lambda *a, **k: (found["found"], found["gaps"], found["papers"])
         answer._draft = lambda *a, **k: None
-        answer._unfaithful = lambda *a, **k: []   # only flags wording; no scored text changes
+        answer._unfaithful = lambda *a, **k: []   # it only flags wording; no scored text changes
     else:
-        read = answer._map
+        # Save the papers' findings for a later --remerge. Wrap the original
+        # reader, not the last review's wrapper, so each review saves its own.
         def keep(*a, **k):
-            res = read(*a, **k)
+            res = _READ_PAPERS(*a, **k)
             _write({"model": answer.config.OLLAMA_MODEL, "found": res[0], "gaps": res[1], "papers": res[2]},
                    "answers", "found", f"{r['id']}.json")
             return res
@@ -287,23 +299,26 @@ def _row(name: str, t: dict) -> str:
 
 if __name__ == "__main__":
     store.enable()
-    step, ids = sys.argv[1], [a for a in sys.argv[2:] if not a.startswith("--")]
-    if "--deep" in sys.argv:
+    step, args = sys.argv[1], sys.argv[2:]
+    ids = [a for a in args if not a.startswith("--")]
+    flags = dict(a[2:].partition("=")[::2] for a in args if a.startswith("--"))
+    if "deep" in flags:
         DEPTH, ANSWERS, SCORED = "deep", os.path.join("answers", "deep"), os.path.join("scored", "deep")
-    if "--remerge" in sys.argv:
+    if "remerge" in flags:
         REMERGE, ANSWERS, SCORED = True, os.path.join("answers", "remerge"), os.path.join("scored", "remerge")
-    for a in sys.argv:
-        if a.startswith("--batch="):        # try another answer.MERGE_BATCH
-            answer.MERGE_BATCH = int(a.split("=")[1])
-        if a.startswith("--method="):       # another answer.COMBINE, e.g. ranked
-            METHOD = a.split("=")[1]
+    if "method" in flags:
+        METHOD = flags["method"]
+    if "batch" in flags:
+        answer.MERGE_BATCH = int(flags["batch"])
+    if "top" in flags:
+        answer.RANK_TOP = int(flags["top"])
     if step == "rival":
         for row in reviews(ids[1:]):
             rows = [s for s in rival(ids[0], row) if s["reachable"] in ("yes", "partly")]
             print(ids[0], row["id"], f"yes {sum(s['answer'] == 'yes' for s in rows)}/{len(rows)},",
                   f"yes or partly {sum(s['answer'] in ('yes', 'partly') for s in rows)}/{len(rows)}", flush=True)
     elif step == "table":
-        table("test" if "--test" in sys.argv else "tune")
+        table("test" if "test" in flags else "tune")
     else:
         step_fn = {"load": load, "extract": extract, "answer": run_answer, "score": score, "export": export}[step]
         for row in reviews(ids):

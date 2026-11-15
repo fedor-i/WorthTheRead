@@ -10,8 +10,9 @@ into a claim it doesn't support (overstatement).
 import html
 import json
 import math
-import time
 import re
+import time
+import urllib.request
 
 from . import config
 from . import focus as _focus
@@ -268,7 +269,6 @@ def _merge(question: str, chosen: list, found: list, items: list) -> tuple:
     return merged, data
 
 
-
 _SUPPORT_SYSTEM = """You check which FINDINGS back a SENTENCE. A finding backs \
 it only if, on its own, it says what the sentence says about the same thing: \
 the same place or region, population, nutrient and outcome. A finding on the \
@@ -280,7 +280,9 @@ def _supporting(sentence: str, found: list, ids: set) -> set:
     """The ids, among `ids`, whose findings back `sentence` on their own. The
     merge groups findings by topic, so a sentence about one region can pick up
     findings about another; one short call per sentence prunes them. If the
-    check fails to answer, the merge's ids stand."""
+    check fails to answer, the merge's ids stand. The answer uses the part
+    check (_supporting_parts); this whole-sentence one is kept for comparison
+    in benchmark/multi_source_experiment.py."""
     ordered = sorted(ids)
     listing = "\n".join(f"C{k} {found[i][1]}" for k, i in enumerate(ordered, 1))
     try:
@@ -540,7 +542,6 @@ def _overview(question: str, rows: list, found: list, report) -> list:
         return []
     report(stage="overview", claims=len(rows))
     papers = lambda ids: ", ".join(f"P{n}" for n in sorted({found[i][0] for i in ids}))
-    rows = [(r[0], r[1], r[2] if len(r) > 2 else "") for r in rows]
     listing = "\n".join(f"C{k} [{papers(ids)}]{f' ({note})' if note else ''} {text}"
                         for k, (text, ids, note) in enumerate(rows, 1))
     rows = [(text, ids) for text, ids, _ in rows]
@@ -667,13 +668,11 @@ def _map(question: str, chosen: list, report, depth: str = "standard") -> tuple:
     return found, gaps, infos
 
 
-def _combine_merge(question: str, chosen: list, found: list, report, parts: bool = True) -> tuple:
+def _combine_merge(question: str, chosen: list, found: list, report) -> tuple:
     """Merge the findings into answer sentences, in parts when there are many
     (each round merges groups of at most MERGE_BATCH, until one call can take
-    the rest), then check each sentence's findings. With `parts` (the
-    default) a finding that backs one part of the sentence stays, cited at
-    that part; without, only findings that back the whole sentence stay.
-    Returns
+    the rest), then check each sentence's findings: a finding that backs one
+    part of the sentence stays, cited at that part. Returns
     ([(sentence, {finding ids}, {id: part})], not_addressed, truncated)."""
     truncated = False
     items, rnd = [(text, {i}) for i, (_, text, _) in enumerate(found)], 0
@@ -705,98 +704,13 @@ def _combine_merge(question: str, chosen: list, found: list, report, parts: bool
         where = {}
         if len(ids) > 1:
             report(stage="check", claim=k, claims=len(final))
-            ids, where = _supporting_parts(text, found, ids) if parts else (_supporting(text, found, ids), {})
+            ids, where = _supporting_parts(text, found, ids)
         checked.append((text, ids, where))
     return checked, _strings(data.get("not_addressed")), truncated
 
 
 def _strings(xs) -> list:
     return [x for x in xs or [] if isinstance(x, str) and x.strip()]
-
-
-# --- group first, then write (experimental) -------------------------------------
-# The merge above writes sentences and then points at findings, so a sentence can
-# pick up findings that are merely on its topic. Here the findings are grouped
-# first — same point about the same place, population and nutrient — and one
-# sentence is written per group, so a sentence's sources are its group by
-# construction (Slobodkin et al. 2024, "Attribute First, then Generate").
-
-_GROUP_SYSTEM = """You sort FINDINGS from several papers into groups, to answer \
-a QUESTION. Put findings in the same group only when they make the same point \
-about the same place or region, population, nutrient and outcome (they agree, \
-or one adds detail to the other). Findings about different regions, nutrients \
-or results go in different groups, even when the topic is similar. Findings \
-that contradict each other about the same thing go in separate groups. Every \
-finding goes in exactly one group; a finding unlike any other is a group of its own.
-
-Return ONLY a JSON object: {"groups": [{"ids": ["C1", "C4"], "point": "short label"}]}"""
-
-_WRITE_SYSTEM = """You write an answer to a QUESTION from GROUPS of findings. \
-For each group you use, write ONE short plain-language sentence that says only \
-what that group's findings say: you may combine them, keep their numbers, \
-places and caveats, and never add outside knowledge. Choose and order the groups \
-that answer the question best, at most 10; skip groups that don't bear on it. \
-If part of the question is answered by no group, say so in "not_addressed".
-
-Return ONLY a JSON object: {"claims": [{"group": "G1", "claim": "..."}], "not_addressed": ["..."]}"""
-
-
-def _combine_grouped(question: str, chosen: list, found: list, report) -> tuple:
-    """Group the findings, then write one sentence per group. Returns
-    ([(sentence, {finding ids})], not_addressed, truncated)."""
-    report(stage="group", papers=len(chosen), claims=len(found))
-    listing = "\n".join(f"C{i} [P{n}] {text}" for i, (n, text, _) in enumerate(found, 1))
-    try:
-        data = _parse(_complete(_GROUP_SYSTEM, f"QUESTION:\n{question}\n\nFINDINGS:\n{listing}",
-                                max_tokens=1500))
-    except Exception:
-        data = {}
-    groups, seen = [], set()
-    for g in data.get("groups") or []:
-        ids = []
-        for ref in (g.get("ids") or []) if isinstance(g, dict) else []:
-            m = re.search(r"\d+", str(ref))
-            i = int(m.group(0)) - 1 if m else -1
-            if 0 <= i < len(found) and i not in seen:
-                ids.append(i)
-                seen.add(i)
-        if ids:
-            groups.append(ids)
-    groups += [[i] for i in range(len(found)) if i not in seen]   # the model's leftovers
-    truncated = bool(data.get("truncated"))
-
-    report(stage="merge", papers=len(chosen), claims=len(found))
-    listing = "\n\n".join(f"G{k}:\n" + "\n".join(f"  [P{found[i][0]}] {found[i][1]}" for i in ids)
-                           for k, ids in enumerate(groups, 1))
-    try:
-        data = _parse(_complete(_WRITE_SYSTEM, f"QUESTION:\n{question}\n\nGROUPS:\n{listing}",
-                                max_tokens=2000))
-    except Exception:
-        data = {}
-    final, used = [], set()
-    for c in data.get("claims") or []:
-        if not isinstance(c, dict) or not (c.get("claim") or "").strip():
-            continue
-        m = re.search(r"\d+", str(c.get("group", "")))
-        k = int(m.group(0)) - 1 if m else -1
-        if 0 <= k < len(groups) and k not in used:
-            used.add(k)
-            final.append((_strip_ids(c["claim"]), set(groups[k]), {}))
-    return final, _strings(data.get("not_addressed")), truncated or bool(data.get("truncated"))
-
-
-def _combine_grouped_parts(question: str, chosen: list, found: list, report) -> tuple:
-    """Group first, then the part check on each written sentence: the group
-    proposes the sources, the check drops any the sentence doesn't use."""
-    final, not_addressed, truncated = _combine_grouped(question, chosen, found, report)
-    checked = []
-    for k, (text, ids, _) in enumerate(final, 1):
-        where = {}
-        if len(ids) > 1:
-            report(stage="check", claim=k, claims=len(final))
-            ids, where = _supporting_parts(text, found, ids)
-        checked.append((text, ids, where))
-    return checked, not_addressed, truncated
 
 
 # --- group by meaning, rank, then write ------------------------------------------
@@ -807,7 +721,7 @@ def _combine_grouped_parts(question: str, chosen: list, found: list, report) -> 
 # groups ranked by how many papers back them and how close they are to the
 # question, with a penalty for repeating a group already picked, and the model
 # only writes one sentence per top group. Findings past the top stay listed.
-RANK_TOP = 10        # sentences written, as the merge's "at most 10"
+RANK_TOP = 20        # sentences written; 10 left FSP1, NRF2 and NCOA4 just below the cut (RESULTS.md)
 RANK_SAME = 0.85     # cosine at which two findings are the same point
 RANK_REPEAT = 0.3    # weight of the penalty for being like a group already picked
 RANK_SHOW = 5        # findings per group shown to the writer
@@ -823,7 +737,6 @@ Return ONLY a JSON object: {"claims": [{"claim": "...", "group": "G1"}]}"""
 
 def _embed(texts: list) -> list:
     """Unit vectors for `texts` from the local embedding model, or None."""
-    import urllib.request
     req = urllib.request.Request(f"{config.OLLAMA_URL}/api/embed", headers={"Content-Type": "application/json"},
                                  data=json.dumps({"model": config.EMBED_MODEL, "input": texts}).encode())
     for attempt in range(3):     # a 400 can come while Ollama swaps models in memory
@@ -902,9 +815,7 @@ def _combine_ranked(question: str, chosen: list, found: list, report) -> tuple:
     return checked, [], bool(data.get("truncated"))
 
 
-COMBINE = {"merge": _combine_merge, "grouped": _combine_grouped,
-           "merge_whole": lambda *a: _combine_merge(*a, parts=False),
-           "grouped_parts": _combine_grouped_parts, "ranked": _combine_ranked}
+COMBINE = {"merge": _combine_merge, "ranked": _combine_ranked}
 
 
 def _doi(p: dict) -> str:
@@ -1008,7 +919,11 @@ def ask_many(question: str, papers: list, progress=None, max_papers: int = None,
 
     merged, used = [], set()
     if len(found) > 1:
-        final, out["not_addressed"], out["truncated"] = COMBINE[method or config.COMBINE](question, chosen, found, report)
+        combine = COMBINE.get(method or config.COMBINE)
+        if not combine:
+            raise ValueError(f"Unknown combine method {method or config.COMBINE!r} "
+                             f"(WYR_COMBINE): use one of {', '.join(COMBINE)}")
+        final, out["not_addressed"], out["truncated"] = combine(question, chosen, found, report)
         # Each merged claim goes to the vote of the other papers' findings:
         # those that agree back it too; those that contradict it are kept
         # with it, and a claim more original papers contradict is outvoted.

@@ -92,11 +92,11 @@ Zotero.WorthYourReadSelfTest = {
         WYR.renderAskMany(st);
         log("resultText", st.container.textContent.slice(-600));
         const tabText = st.container.textContent;
-        log("tabWarnings", { numbers: tabText.includes("Check this: 2 is not in any of its sources"),
+        log("tabWarnings", { numbers: tabText.includes("Check this: numbers not in any quote: 2"),
           problemWords: tabText.includes("Check this: “another study found” — it reads as 2 studies"),
           problemNoWords: tabText.includes("Check this: the finding says lesser, not greater"),
           shortAnswer: tabText.includes("Short answer") && tabText.includes("SELFTEST short answer: iron in HNLC areas. [1, 2]")
-            && tabText.includes("Check this: none of its findings backs this sentence.") });
+            && tabText.includes("Check this: no quote backs this.") });
         const note = await WYR.saveAskManyNote(st);
         const html = note.getNote();
         log("noteHTML", { firstPaperHasPDF: !!att0?.attachmentReaderType,
@@ -109,7 +109,7 @@ Zotero.WorthYourReadSelfTest = {
           noDraft: !html.includes("SELFTEST draft answer") && !tabText.includes("SELFTEST draft answer"),
           shortAnswer: html.indexOf("<h2>Short answer</h2>") < html.indexOf("SELFTEST short answer")
             && html.indexOf("SELFTEST short answer") < html.indexOf("<h2>Evidence</h2>"),
-          numbersFlag: html.includes("Check: 2 is not in its sources"),
+          numbersFlag: html.includes("Check: numbers not in any quote: 2"),
           problemFlags: html.includes("Check: “another study found” — it reads as 2 studies")
             && html.includes("Check: the finding says lesser, not greater"),
           // paper 1 backs both parts: cited twice in the sentence

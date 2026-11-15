@@ -16,6 +16,29 @@ const VERDICT_COLOR = {
   SUPPORTED: "#1b7f3b", OVERSTATED: "#b8860b",
   UNSUPPORTED: "#b3261e", INSUFFICIENT: "#6b6b6b",
 };
+const RED = "#b3261e", GREEN = "#1b7f3b";    // warnings / done
+
+// The wording the MCP card and the website use, copied verbatim from render.py's
+// constants (CLOSE_MATCH, NO_QUOTE, UNSOURCED_NUMBERS, FULL_TEXT, ABSTRACT_ONLY,
+// RETRACTED, CONCERN, WRONG_PAPER, ...), so a result reads the same on every surface.
+const LABEL = {
+  close: "(close match: wording differs from the paper)",
+  noQuote: "no quote backs this",
+  numbers: (ns) => `numbers not in any quote: ${ns.join(", ")}`,
+  disputed: (ns) => `disputed by ${ns.map(n => `[${n}]`).join(", ")}`,
+  fullText: "full text", abstractOnly: "abstract only",
+  retracted: "🚩 RETRACTED", concern: "concern", wrongPaper: "⚠ wrong-paper?",
+};
+
+/** The status flags next to a verdict, most serious first (render._flags). */
+function verdictFlags(r) {
+  const flags = [(r.has_fulltext ?? r.has_results) ? LABEL.fullText : LABEL.abstractOnly];
+  if (r.retracted) flags.unshift(LABEL.retracted);
+  else if (r.concern) flags.unshift(LABEL.concern);
+  if (r.citation_ok === false && !r.verified_from_preprint) flags.push(LABEL.wrongPaper);
+  return flags;
+}
+const ASPECT_ICON = { ENTAILED: "✓", CONTRADICTED: "✗", ABSENT: "—" };
 
 // Highlight colors from Zotero's own palette, and the tag every highlight
 // this plugin makes carries (so they can be filtered or removed together).
@@ -197,30 +220,45 @@ function withTimeout(promise, ms) {
   })]).finally(() => win.clearTimeout(timer));
 }
 
+/** [first author, year] of an item. firstCreator wraps names in invisible
+ * bidi isolates (U+2066–U+2069), which are dropped. */
+function authorYear(item) {
+  return [item.firstCreator.replace(/[\u2066-\u2069]/g, ""),
+    Zotero.Date.strToDate(item.getField("date") || "").year];
+}
+
 /** "Ioannidis 2005 — Why most published research…" for lists and prompts. */
 function shortLabel(item) {
-  const year = Zotero.Date.strToDate(item.getField("date") || "").year;
-  // firstCreator wraps names in invisible bidi isolates (U+2068/U+2069).
-  const who = [item.firstCreator.replace(/[\u2066-\u2069]/g, ""), year].filter(Boolean).join(" ");
+  const who = authorYear(item).filter(Boolean).join(" ");
   const title = item.getDisplayTitle();
   return (who ? `${who} — ` : "") + (title.length > 70 ? title.slice(0, 67) + "…" : title);
 }
 
 const READ_FIRST = 5;     // papers highlighted "Read first" in an answer note's references
 
+// Why a paper was left out of an ask-across answer (answer.ask_many `left_out`
+// reasons; a load failure reads "load_failed: <ErrorType>").
 const LEFT_OUT = { limit: "beyond the number of papers you chose", no_text: "no readable text",
   load_failed: "couldn't be loaded" };
 
+/** The papers an answer didn't read: [{label, key?, reason?}]. */
+function leftOut(r) {
+  return r.left_out || (r.skipped || []).map(label => ({ label }));
+}
+
+function leftOutReason(p) {
+  return p.reason ? LEFT_OUT[p.reason.split(":")[0]] || p.reason : "";
+}
+
 /** "Martin 1990 — Glacial-interglacial… (no readable text)" per paper an answer didn't read. */
 function leftOutLines(r) {
-  return (r.left_out || (r.skipped || []).map(label => ({ label })))
-    .map(p => p.reason ? `${p.label} (${LEFT_OUT[p.reason] || p.reason})` : p.label);
+  return leftOut(r).map(p => p.reason ? `${p.label} (${leftOutReason(p)})` : p.label);
 }
 
 /** How many papers back a merged claim, and which contradict it (see answer._tally). */
 function voteText(v) {
   return !v ? "" : (v.reviews_only ? "Backed by reviews only" : `Backed by ${v.papers.length} paper${v.papers.length === 1 ? "" : "s"}`)
-    + (v.against.length ? `; papers ${v.against.join(", ")} say otherwise (${v.votes[0]} vs ${v.votes[1]} original papers)` : "")
+    + (v.against.length ? `; ${LABEL.disputed(v.against)} (${v.votes[0]} vs ${v.votes[1]} original papers)` : "")
     + (v.outvoted ? " — most papers disagree" : "");
 }
 
@@ -252,10 +290,17 @@ function libraryPath(item) {
     ? `groups/${Zotero.Groups.getGroupIDFromLibraryID(item.libraryID)}` : "library";
 }
 
+const DOI_RE = /10\.\d{4,9}\/[-._;()/:A-Za-z0-9]+/;
+
+/** A regular item's DOI: its DOI field, else one written in Extra. */
+function itemDOI(item) {
+  return (item.getField("DOI") || "").match(DOI_RE)?.[0]
+    || (item.getField("extra") || "").match(DOI_RE)?.[0] || "";
+}
+
 /** The paper online: its DOI, else the item's URL. */
 function onlineURL(item) {
-  const doi = (item.getField("DOI") || "").match(DOI_RE)?.[0]
-    || (item.getField("extra") || "").match(DOI_RE)?.[0];
+  const doi = itemDOI(item);
   if (doi) return `https://doi.org/${doi}`;
   const url = item.getField("url");
   return /^https?:\/\//.test(url) ? url : null;
@@ -287,7 +332,33 @@ function badge(doc, label, color) {
   }, label);
 }
 
-const DOI_RE = /10\.\d{4,9}\/[-._;()/:A-Za-z0-9]+/;
+function verdictBadge(doc, v) {
+  return badge(doc, v || "?", VERDICT_COLOR[v] || "#666");
+}
+
+/** "High (0.82)", as the MCP card shows band and confidence. */
+function bandText(r) {
+  return `${r.band || "?"} (${Number(r.confidence ?? 0).toFixed(2)})`;
+}
+
+/** A Zotero citation of `item` (at `page`), built the way the note editor
+ * does: item URI plus CSL item data (without it the editor renders "()").
+ * Returns {citationItem, span}: the item for the note's data-citation-items
+ * and the citation's HTML. */
+function citationFor(item, page) {
+  const citationItem = { uris: [Zotero.URI.getItemURI(item)],
+    itemData: Zotero.Utilities.Item.itemToCSLJSON(item) };
+  const citation = { citationItems: [page ? { ...citationItem, locator: String(page), label: "page" }
+    : citationItem], properties: {} };
+  return { citationItem, span: `<span class="citation" data-citation="${encodeURIComponent(JSON.stringify(citation))}">`
+    + `${Zotero.EditorInstanceUtilities.formatCitation(citation)}</span>` };
+}
+
+/** The status line after highlighting (see WorthYourRead.highlight). */
+function highlightMessage(res) {
+  return res.message + (res.temporary && res.made
+    ? " They'll be removed at your next action or when you close the PDF." : "");
+}
 
 /** Which paper an item stands for: its PDF (read offline) and its DOI/URL. */
 async function paperFor(item) {
@@ -302,7 +373,7 @@ async function paperFor(item) {
   const paper = { title: parent.getDisplayTitle() };
   if (att && att.attachmentContentType === "application/pdf") paper.attachment_key = att.key;
   if (parent.isRegularItem()) {
-    const doi = parent.getField("DOI") || (parent.getField("extra").match(DOI_RE) || [])[0];
+    const doi = itemDOI(parent);
     const url = parent.getField("url");
     if (doi) paper.reference = doi;
     else if (url) paper.reference = url;
@@ -349,15 +420,15 @@ Zotero.WorthYourRead = {
   id: null,
   rootURI: null,
   sectionID: null,
-  menuID: null,
+  menuID: null,           // the note's "Check citations" menu
   notifierID: null,
   readerHandler: null,
-  state: new Map(),       // item id -> { busy, view, result, error, claim }
+  state: new Map(),       // item id -> { busy, view, result, error, claim, hl, hlTemp }
   bodies: new Map(),      // item id -> last rendered section body
   drafts: new Map(),      // note id -> draft-check state (rendered in a tab)
   researches: [],         // research-tab states
   askManys: [],           // ask-across-papers tab states
-  researchMenuIDs: [],
+  menuIDs: [],            // every other menu
 
   async startup({ id, rootURI }) {
     this.id = id;
@@ -383,7 +454,7 @@ Zotero.WorthYourRead = {
         onCommand: (event, ctx) => this.openDraftCheck(ctx.items[0]),
       }],
     });
-    this.researchMenuIDs = [
+    this.menuIDs = [
       Zotero.MenuManager?.registerMenu({
         menuID: "wyr-research", pluginID: id, target: "main/menubar/tools",
         menus: [{ menuType: "menuitem", l10nID: "wyr-menu-research",
@@ -466,7 +537,7 @@ Zotero.WorthYourRead = {
     Sidecar.stop();
     if (this.sectionID) Zotero.ItemPaneManager.unregisterSection(this.sectionID);
     if (this.menuID) Zotero.MenuManager.unregisterMenu(this.menuID);
-    for (const m of this.researchMenuIDs || []) Zotero.MenuManager.unregisterMenu(m);
+    for (const m of this.menuIDs) Zotero.MenuManager.unregisterMenu(m);
     if (this.readerHandler) {
       Zotero.Reader.unregisterEventListener("renderTextSelectionPopup", this.readerHandler);
     }
@@ -513,7 +584,7 @@ Zotero.WorthYourRead = {
         item.isRegularItem() ? h(doc, "button", { dataset: { action: "similar" },
           onclick: () => this.findSimilar(item) }, "Find similar papers") : null),
       st.busy && h(doc, "div", { style: "color:var(--fill-secondary)" }, st.busy),
-      st.error && h(doc, "div", { style: "color:#b3261e" }, st.error),
+      st.error && h(doc, "div", { style: `color:${RED}` }, st.error),
       st.result && this.renderResult(doc, item, st.view, st.result)));
   },
 
@@ -562,19 +633,31 @@ Zotero.WorthYourRead = {
       onclick: async (e) => { e.preventDefault(); const { att } = await paperFor(item); openAtPage(att, page); },
     }, page ? `p. ${page}` : "open");
     if (view === "verify" || view === "revise") {
-      const v = r.verdict;
+      // A revise result is the loop's outcome; its primary verdict is `verification`.
+      const vr = view === "revise" ? r.verification || r : r;
       if (view === "revise") {
         box.append(h(doc, "div", {}, h(doc, "b", {}, r.revised ? "Reworded: " : "No rewording needed: "),
           r.claim || ""));
       }
-      box.append(h(doc, "div", {}, badge(doc, v || "?", VERDICT_COLOR[v] || "#666"),
-        ` (${(r.confidence ?? 0).toFixed(2)})`));
+      box.append(h(doc, "div", {}, verdictBadge(doc, vr.verdict), ` ${bandText(vr)} · ${verdictFlags(vr).join(" · ")}`));
       if (r.summary) box.append(h(doc, "div", {}, r.summary));
-      for (const a of r.aspects || []) {
+      const quoteLine = (q) => h(doc, "div", { style: "margin-left:12px;color:var(--fill-secondary)" },
+        `“${q.quote}” `, q.close_match ? `${LABEL.close} ` : "", quoteLink(q.quote, q.page));
+      for (const a of vr.aspects || []) {
         box.append(h(doc, "div", { style: "font-size:12px" },
-          `${a.status === "ENTAILED" ? "✓" : a.status === "CONTRADICTED" ? "✗" : "—"} ${a.type}: ${a.text} `,
-          a.quote ? h(doc, "div", { style: "margin-left:12px;color:var(--fill-secondary)" },
-            `“${a.quote}” `, quoteLink(a.quote, a.page)) : null));
+          `${ASPECT_ICON[a.status] || "?"} ${a.type}: ${a.text} `, a.quote ? quoteLine(a) : null));
+      }
+      // No breakdown: the first evidence quote, as the MCP card shows it.
+      const ev = (vr.aspects || []).length ? null : (vr.evidence || []).find(e => e.quote);
+      if (ev) box.append(h(doc, "div", { style: "font-size:12px" }, quoteLine(ev)));
+      // The card's closing line: the overstatement, else the judge's reason; then the gap.
+      const why = vr.verdict === "OVERSTATED" && vr.distortion_note
+        ? [`Overstatement${vr.distortion_label ? ` (${vr.distortion_label})` : ""}. `, vr.distortion_note]
+        : vr.rationale ? ["Why. ", vr.rationale] : null;
+      if (why) box.append(h(doc, "div", { style: "font-size:12px" }, h(doc, "b", {}, why[0]), why[1]));
+      if (vr.claim_aspects_unmet?.length) {
+        box.append(h(doc, "div", { style: "font-size:12px;color:var(--fill-secondary)" },
+          h(doc, "b", {}, "Gap. "), vr.claim_aspects_unmet.join("; ")));
       }
       const buttons = h(doc, "div", { style: "display:flex;gap:6px;flex-wrap:wrap" });
       if (view === "verify" && verdictHighlights(r, r.claim).length) {
@@ -590,22 +673,23 @@ Zotero.WorthYourRead = {
     }
     // ask / summarize: grounded claims
     box.append(h(doc, "div", {},
-      h(doc, "b", {}, `Confidence ${r.band} (${r.confidence.toFixed(2)})`),
-      ` · ${r.grounded} grounded, ${r.ungrounded} not found in the text`,
+      h(doc, "b", {}, `Confidence ${bandText(r)}`),
+      ` · ${r.grounded} grounded, ${r.ungrounded} not grounded (${LABEL.noQuote})`,
       r.abstract_only ? " · abstract only" : ""));
     if (view === "summarize" && r.note_id) {
-      box.append(h(doc, "div", { style: "color:#1b7f3b" }, "Saved as a child note."));
+      box.append(h(doc, "div", { style: `color:${GREEN}` }, "Saved as a child note."));
     }
     for (const c of r.claims || []) {
       const ok = c.status === "GROUNDED";
-      box.append(h(doc, "div", { style: `font-size:12px;${ok ? "" : "color:#b3261e"}` },
-        `${ok ? "✓" : "⚠"} ${c.claim}`,
+      box.append(h(doc, "div", { style: `font-size:12px;${ok ? "" : `color:${RED}`}` },
+        `${ok ? "✓" : "⚠"} ${c.claim}`, ok ? "" : ` (${LABEL.noQuote})`,
+        c.verdict ? h(doc, "span", {}, " ", verdictBadge(doc, c.verdict)) : null,
         ...c.quotes.filter(q => q.verified).map(q => h(doc, "div",
           { style: "margin-left:12px;color:var(--fill-secondary)" }, `“${q.text}” `, quoteLink(q.text, q.page)))));
     }
     if (r.not_addressed?.length) {
       box.append(h(doc, "div", { style: "font-size:12px;color:var(--fill-secondary)" },
-        "Not addressed by the paper: " + r.not_addressed.join("; ")));
+        "Not addressed by this paper: " + r.not_addressed.join("; ")));
     }
     if (answerHighlights(r).length) {
       box.append(h(doc, "div", {}, h(doc, "button", { dataset: { action: "highlight" },
@@ -618,10 +702,16 @@ Zotero.WorthYourRead = {
     const st = this.state.get(item.id) || {};
     if (!st.hl) return null;
     return h(doc, "div", { dataset: { wyrHl: "" }, style: "font-size:12px;color:var(--fill-secondary)" }, st.hl, " ",
-      st.hlTemp ? h(doc, "button", { dataset: { action: "keep-highlights" }, onclick: async () => {
-        const n = await this.keepHighlights();
-        this.setState(item.id, { hl: `Kept ${n} highlight(s) permanently (tagged “${HL_TAG}”).`, hlTemp: false });
-      } }, "Keep highlights") : null);
+      st.hlTemp ? this.keepButton(doc, (msg) => this.setState(item.id, { hl: msg, hlTemp: false })) : null);
+  },
+
+  /** "Keep highlights": makes the temporary highlights permanent, then calls
+   * `done` with the message to show in place of the old one. */
+  keepButton(doc, done) {
+    return h(doc, "button", { dataset: { action: "keep-highlights" }, onclick: async () => {
+      const n = await this.keepHighlights();
+      done(`Kept ${n} highlight(s) permanently (tagged “${HL_TAG}”).`);
+    } }, "Keep highlights");
   },
 
   // --- highlighting quotes in the PDF -------------------------------------------
@@ -717,9 +807,7 @@ Zotero.WorthYourRead = {
       const { att } = await paperFor(item);
       const entries = view === "verify" ? verdictHighlights(r, r.claim) : answerHighlights(r);
       const res = await this.highlight(att, entries);
-      this.setState(item.id, { hl: res.message + (res.temporary && res.made
-        ? " They'll be removed at your next action or when you close the PDF." : ""),
-        hlTemp: res.temporary && res.made > 0 });
+      this.setState(item.id, { hl: highlightMessage(res), hlTemp: res.temporary && res.made > 0 });
       return res;
     }
     catch (e) {
@@ -733,7 +821,7 @@ Zotero.WorthYourRead = {
   /** "Find similar": research seeded by this paper (its DOI), with its title +
    * abstract as the question. */
   findSimilar(item, { maxPapers } = {}) {
-    const doi = item.getField("DOI") || (item.getField("extra").match(DOI_RE) || [])[0];
+    const doi = itemDOI(item);
     if (!doi) {
       Zotero.alert(null, "Worth Your Read", "Finding similar papers needs the item's DOI.");
       return null;
@@ -765,7 +853,7 @@ Zotero.WorthYourRead = {
     try {
       rs.result = await Client.run("research", { question: rs.question, seed_dois: rs.seedDois,
         max_papers: rs.maxPapers }, (p) => { rs.progress = p; this.renderResearch(rs); });
-      const have = await this.libraryDOIs();
+      const have = await this.libraryIndex();
       for (const p of rs.result.papers) {
         p.in_library = !!this.inLibrary(have, p);
         if (p.relevance === 3 && p.doi && !p.in_library) rs.selected.add(p.id);
@@ -777,10 +865,10 @@ Zotero.WorthYourRead = {
     return rs;
   },
 
-  /** DOIs (lowercase) of regular items already in the user's library. */
-  /** Library items keyed by DOI and by normalized title ("t:…"): the same
-   * paper often has several DOIs (journal version, reprint, preprint). */
-  async libraryDOIs() {
+  /** Regular items in the user's library, keyed by lowercase DOI and by
+   * normalized title ("t:…"): the same paper often has several DOIs (journal
+   * version, reprint, preprint). */
+  async libraryIndex() {
     const items = await Zotero.Items.getAll(Zotero.Libraries.userLibraryID, true);
     const have = new Map();
     for (const i of items.filter(i => i.isRegularItem())) {
@@ -825,7 +913,7 @@ Zotero.WorthYourRead = {
         h(doc, "span", { style: "color:var(--fill-secondary)" },
           "· only search terms and paper ids leave your machine")),
       rs.running ? h(doc, "div", { dataset: { wyrProgress: "" } }, stageText(rs.progress)) : null,
-      rs.error ? h(doc, "div", { style: "color:#b3261e" }, rs.error) : null);
+      rs.error ? h(doc, "div", { style: `color:${RED}` }, rs.error) : null);
     if (r) root.append(this.renderResearchResult(doc, rs));
     rs.container.replaceChildren(root);
   },
@@ -847,7 +935,7 @@ Zotero.WorthYourRead = {
       h(doc, "button", { dataset: { action: "research-import" }, onclick: () => this.importResearch(rs),
         ...(rs.selected.size && !rs.importing ? {} : { disabled: "true" }) },
         `Import ${rs.selected.size} selected into a new collection`)));
-    if (rs.importMsg) box.append(h(doc, "div", { style: "margin-bottom:8px;color:#1b7f3b" }, rs.importMsg));
+    if (rs.importMsg) box.append(h(doc, "div", { style: `margin-bottom:8px;color:${GREEN}` }, rs.importMsg));
     const groups = [
       ["Directly on the question", p => p.relevance === 3 && !p.cited_core],
       ["Supporting evidence (other populations, models, mechanisms)", p => p.relevance === 2 && !p.cited_core],
@@ -867,7 +955,7 @@ Zotero.WorthYourRead = {
         box.append(h(doc, "div", { dataset: { paper: p.id }, style: "display:flex;gap:8px;margin:3px 0" }, cb,
           h(doc, "div", {},
             h(doc, "span", {}, `${p.title} (${p.year || "n.d."})`),
-            p.in_library ? h(doc, "span", { style: "color:#1b7f3b" }, " · in library") : null,
+            p.in_library ? h(doc, "span", { style: `color:${GREEN}` }, " · in library") : null,
             p.is_oa ? h(doc, "span", { style: "color:var(--fill-secondary)" }, " · open access") : null,
             p.round ? h(doc, "div", { style: "font-size:11px;color:var(--fill-secondary)" },
               `round ${p.round}${p.support ? ` · pointed to by ${p.support} accepted paper(s)` : ""}${via ? ` · ${via}` : ""}`) : null)));
@@ -895,7 +983,7 @@ Zotero.WorthYourRead = {
     const r = rs.result;
     const picked = r.papers.filter(p => rs.selected.has(p.id) && p.doi);
     const lib = Zotero.Libraries.userLibraryID;
-    const have = await this.libraryDOIs();
+    const have = await this.libraryIndex();
     const col = new Zotero.Collection();
     col.libraryID = lib;
     col.name = `WYR: ${(rs.title !== "Research" ? rs.title : rs.question).slice(0, 70)}`;
@@ -930,8 +1018,6 @@ Zotero.WorthYourRead = {
     this.renderResearch(rs);
     return rs;
   },
-
-  // --- Read: verify a PDF selection -------------------------------------------
 
   // --- Ask across papers: one question, several papers, one grounded answer ---
 
@@ -1018,6 +1104,7 @@ Zotero.WorthYourRead = {
         st.running ? h(doc, "span", { dataset: { wyrProgress: "" } },
           st.progress?.stage === "follow" ? "Finding the papers their introductions cite…"
           : st.progress?.stage === "draft" ? "Writing a quick draft from a few passages…"
+            : st.progress?.stage === "group" ? `Grouping ${st.progress.claims} findings from ${st.progress.papers} papers by meaning…`
             : st.progress?.stage === "paper" ? `Reading paper ${st.progress.paper} of ${st.progress.papers}: ${st.progress.label}…`
             : st.progress?.stage === "merge" ? `Merging ${st.progress.claims} findings from ${st.progress.papers} papers`
               + (st.progress.parts ? ` (part ${st.progress.part} of ${st.progress.parts})…` : "…")
@@ -1026,7 +1113,7 @@ Zotero.WorthYourRead = {
               : st.progress?.stage === "overview" ? `Writing a short answer from ${st.progress.claims} claims…`
               : st.progress?.stage === "wording" ? `Checking that answer claim ${st.progress.claim} of ${st.progress.claims} says only what its findings say…`
               : "Starting…") : null),
-      st.error ? h(doc, "div", { style: "color:#b3261e" }, st.error) : null);
+      st.error ? h(doc, "div", { style: `color:${RED}` }, st.error) : null);
     if (st.running) root.append(...this.askManyWhileWaiting(doc, st));
     if (st.result) root.append(this.renderAskManyResult(doc, st));
     // Progress redraws the tab every second: stay where the reader is.
@@ -1073,11 +1160,12 @@ Zotero.WorthYourRead = {
     const main = grounded.filter(c => !c.extra), extra = grounded.filter(c => c.extra);
     const ungrounded = r.claims.filter(c => c.status !== "GROUNDED");
     const unused = r.papers.filter(p => !p.used);
-    const numbersWarning = (c) => c.unsourced_numbers?.length ? h(doc, "div", { style: "color:#b3261e" },
-      `Check this: ${c.unsourced_numbers.join(", ")} is not in any of its sources — the merge may have changed a figure.`) : null;
-    const problemsWarning = (c) => (c.problems || []).map(p => h(doc, "div", { style: "color:#b3261e" },
+    const abstractOnly = r.papers.filter(p => p.used && p.abstract_only);
+    const numbersWarning = (c) => c.unsourced_numbers?.length ? h(doc, "div", { style: `color:${RED}` },
+      `Check this: ${LABEL.numbers(c.unsourced_numbers)} — the merge may have changed a figure.`) : null;
+    const problemsWarning = (c) => (c.problems || []).map(p => h(doc, "div", { style: `color:${RED}` },
       `Check this: ${p.words ? `“${p.words}” — ` : ""}${p.why}`));
-    const voteLine = (c) => c.vote ? h(doc, "div", { style: `color:${c.vote.outvoted || c.vote.against.length ? "#b3261e" : "#555"}` },
+    const voteLine = (c) => c.vote ? h(doc, "div", { style: `color:${c.vote.outvoted || c.vote.against.length ? RED : "#555"}` },
       voteText(c.vote)) : null;
     const claimList = (list) => h(doc, "ol", { style: "padding-left:20px" }, list.map(c =>
       h(doc, "li", { style: "margin-bottom:8px" }, c.claim, voteLine(c), numbersWarning(c), ...problemsWarning(c),
@@ -1086,11 +1174,10 @@ Zotero.WorthYourRead = {
           c.against.map(sourceLine)) : null)));
     const overview = (r.overview || []).map(c => h(doc, "div", { style: "margin-bottom:4px" },
       `${c.claim} `, c.sources.length ? `[${[...new Set(c.sources.map(s => s.paper))].join(", ")}]` : "",
-      c.sources.length ? null : h(doc, "div", { style: "color:#b3261e" },
-        "Check this: none of its findings backs this sentence."),
+      c.sources.length ? null : h(doc, "div", { style: `color:${RED}` }, `Check this: ${LABEL.noQuote}.`),
       numbersWarning(c), ...problemsWarning(c)));
     if (!r.claims.length) {
-      return h(doc, "div", { style: "color:#b3261e" },
+      return h(doc, "div", { style: `color:${RED}` },
         r.truncated
           ? "The model's answer was cut off before a single complete claim came through. "
             + "Try fewer papers or a narrower question."
@@ -1101,9 +1188,10 @@ Zotero.WorthYourRead = {
         `The model's answer was cut off; showing the ${r.claims.length} claim(s) that came through complete.`)
         : null,
       h(doc, "div", { style: "margin-bottom:8px" },
-        badge(doc, `${r.band} · ${Number(r.confidence).toFixed(2)}`, "#555"), " ",
+        badge(doc, bandText(r), "#555"), " ",
         `${r.grounded} grounded claim(s), ${r.ungrounded} not verified · `
-        + `${r.papers.filter(p => p.used).length} of ${r.papers.length} papers cited`),
+        + `${r.papers.filter(p => p.used).length} of ${r.papers.length} papers cited`
+        + (abstractOnly.length ? ` · abstract only: ${abstractOnly.map(p => `[${p.n}]`).join(", ")}` : "")),
       overview.length ? h(doc, "h3", { style: "margin:10px 0 4px" }, "Short answer") : null,
       ...overview,
       overview.length ? h(doc, "h3", { style: "margin:10px 0 4px" }, "Evidence") : null,
@@ -1111,13 +1199,13 @@ Zotero.WorthYourRead = {
       extra.length ? h(doc, "h3", { style: "margin:10px 0 4px" }, "Further findings from individual papers") : null,
       extra.length ? claimList(extra) : null,
       ungrounded.length ? h(doc, "div", {},
-        h(doc, "b", {}, "Not verified against any paper (no passage matched):"),
+        h(doc, "b", {}, `Not verified — ${LABEL.noQuote}:`),
         h(doc, "ul", {}, ungrounded.map(c => h(doc, "li", { style: "color:var(--fill-secondary)" }, c.claim))))
         : null,
       r.not_addressed?.length ? h(doc, "div", { style: "margin-top:6px" },
         h(doc, "b", {}, "Not addressed by these papers: "), r.not_addressed.join("; ")) : null,
       unused.length ? h(doc, "div", { style: "margin-top:6px;color:var(--fill-secondary)" },
-        "Not cited in the answer: " + unused.map(p => `[${p.n}] ${p.label}`).join("; ")) : null,
+        "Read, nothing used: " + unused.map(p => `[${p.n}] ${p.label}`).join("; ")) : null,
       leftOutLines(r).length ? h(doc, "div", { style: "margin-top:6px;color:var(--fill-secondary)" },
         "Not read: " + leftOutLines(r).join("; ")) : null,
       grounded.length ? h(doc, "div", { style: "margin-top:12px" },
@@ -1140,13 +1228,9 @@ Zotero.WorthYourRead = {
     const cite = (n, page) => {
       const item = itemByKey.get(paperN.get(n)?.key);
       if (!item) return "";
-      const citationItem = { uris: [Zotero.URI.getItemURI(item)],
-        itemData: Zotero.Utilities.Item.itemToCSLJSON(item) };
+      const { citationItem, span } = citationFor(item, page);
       stored.set(citationItem.uris[0], citationItem);
-      const citation = { citationItems: [page ? { ...citationItem, locator: String(page), label: "page" }
-        : citationItem], properties: {} };
-      return `<span class="citation" data-citation="${encodeURIComponent(JSON.stringify(citation))}">`
-        + `${Zotero.EditorInstanceUtilities.formatCitation(citation)}</span>`;
+      return span;
     };
     // Links into the library: the item itself, and its PDF at a page.
     const reader = new Map();
@@ -1161,20 +1245,18 @@ Zotero.WorthYourRead = {
     };
     const itemOf = (n) => itemByKey.get(paperN.get(n)?.key);
     const parts = [`<h1>${esc(st.question)}</h1>`,
-      `<p><em>Worth Your Read · ${esc(r.band)} confidence (${Number(r.confidence).toFixed(2)}) · `
+      `<p><em>Worth Your Read · confidence ${esc(bandText(r))} · `
         + `read ${r.papers.length} of ${st.items.length} papers; every quote below was found in the paper it cites. `
         + `References and what to read are at the end.</em></p>`];
     const groundedClaims = r.claims.filter(c => c.status === "GROUNDED");
     const ordered = [...groundedClaims.filter(c => !c.extra), ...groundedClaims.filter(c => c.extra)];
-    const warnings = (c) => (c.unsourced_numbers?.length
-      ? ` <span style="background-color: #ff666680">Check: ${esc(c.unsourced_numbers.join(", "))} is not in its sources</span>` : "")
-      + (c.problems || []).map(p => ` <span style="background-color: #ff666680">Check: `
-        + `${p.words ? `“${esc(p.words)}” — ` : ""}${esc(p.why)}</span>`).join("");
+    const flag = (text) => ` <span style="background-color: #ff666680">Check: ${esc(text)}</span>`;
+    const warnings = (c) => (c.unsourced_numbers?.length ? flag(LABEL.numbers(c.unsourced_numbers)) : "")
+      + (c.problems || []).map(p => flag(`${p.words ? `“${p.words}” — ` : ""}${p.why}`)).join("");
     if (r.overview?.length) {
       parts.push("<h2>Short answer</h2>");
       for (const c of r.overview) {
-        const unbacked = c.sources.length ? ""
-          : ` <span style="background-color: #ff666680">Check: none of its findings backs this sentence</span>`;
+        const unbacked = c.sources.length ? "" : flag(LABEL.noQuote);
         parts.push(`<p>${citedClaimHTML(c.claim, c.sources, n => cite(n))}${unbacked}${warnings(c)}</p>`);
       }
       parts.push("<h2>Evidence</h2>");
@@ -1195,7 +1277,7 @@ Zotero.WorthYourRead = {
     }
     const ungrounded = r.claims.filter(c => c.status !== "GROUNDED");
     if (ungrounded.length) {
-      parts.push("<h2>Not verified against the papers</h2><ul>"
+      parts.push(`<h2>Not verified — ${LABEL.noQuote}</h2><ul>`
         + ungrounded.map(c => `<li><p>${esc(c.claim)}</p></li>`).join("") + "</ul>");
     }
     if (r.not_addressed?.length) {
@@ -1222,7 +1304,7 @@ Zotero.WorthYourRead = {
     const r = st.result;
     const esc = Zotero.Utilities.htmlSpecialChars;
     const mark = (color, text) => `<span style="background-color: ${color}">${esc(text)}</span>`;
-    const YELLOW = "#ffd40080", RED = "#ff666680";
+    const YELLOW = "#ffd40080", RED_MARK = "#ff666680";
     const counts = new Map();             // paper n -> [main claims, further findings]
     for (const c of r.claims.filter(c => c.status === "GROUNDED")) {
       for (const n of new Set(c.sources.filter(s => s.verified).map(s => s.paper))) {
@@ -1233,8 +1315,7 @@ Zotero.WorthYourRead = {
     }
     const entry = (item, label, notes) => {
       if (!item) return `<li><p>${esc(label)}${notes.length ? ` — ${notes.join(" · ")}` : ""}</p></li>`;
-      const year = Zotero.Date.strToDate(item.getField("date") || "").year;
-      const who = item.firstCreator.replace(/[\u2066-\u2069]/g, "");
+      const [who, year] = authorYear(item);
       const journal = item.getField("publicationTitle");
       const pdf = pdfURL(item), web = onlineURL(item);
       return `<li><p>${esc([who, year && `(${year})`].filter(Boolean).join(" "))}${who || year ? ". " : ""}`
@@ -1253,7 +1334,7 @@ Zotero.WorthYourRead = {
       if (main) notes.push(plural(main, "answer claim") + (extra ? `, ${plural(extra, "further finding")}` : ""));
       else if (extra) notes.push(`${plural(extra, "further finding")}`);
       else notes.push(p.error ? "the model failed on this paper" : "nothing on the question found");
-      if (p.abstract_only && (main || extra)) notes.push(mark(RED, "Only the abstract was read") + " — get the full text");
+      if (p.abstract_only && (main || extra)) notes.push(mark(RED_MARK, "Only the abstract was read") + " — get the full text");
       (main ? core : extra ? detail : nothing).push([main, entry(itemOf(p.n), p.label, notes), extra]);
     }
     // Read first: the READ_FIRST papers the answer leans on most (answer
@@ -1262,12 +1343,12 @@ Zotero.WorthYourRead = {
     const first = core.slice(0, READ_FIRST), alsoCited = core.slice(READ_FIRST);
     for (const x of first) x[1] = x[1].replace("<li><p>", `<li><p>${mark(YELLOW, "Read first")} `);
     const byKey = new Map(st.items.map(i => [i.key, i]));
-    const unread = (r.left_out || (r.skipped || []).map(label => ({ label }))).map(p =>
-      entry(byKey.get(p.key), p.label, [mark(RED, "Not read") + (p.reason ? ` — ${LEFT_OUT[p.reason] || p.reason}` : "")]));
+    const unread = leftOut(r).map(p =>
+      entry(byKey.get(p.key), p.label, [mark(RED_MARK, "Not read") + (p.reason ? ` — ${leftOutReason(p)}` : "")]));
     const section = (title, items) => items.length ? [`<h3>${title}</h3>`, `<ol>${items.join("")}</ol>`] : [];
     return ["<h2>References</h2>",
       `<p>${mark(YELLOW, "Read first")}: the answer leans on these most. `
-        + `${mark(RED, "Not read")}: the assistant didn't read these, so the answer says nothing about them — read them yourself. `
+        + `${mark(RED_MARK, "Not read")}: the assistant didn't read these, so the answer says nothing about them — read them yourself. `
         + "Titles open the paper in your library; “PDF” opens your copy, “Online” the publisher's page.</p>",
       ...section("Read first", first.map(x => x[1])),
       ...section("Not read by the assistant", unread),
@@ -1275,6 +1356,8 @@ Zotero.WorthYourRead = {
       ...section("Supporting detail", detail.map(x => x[1])),
       ...section("Read, nothing on the question", nothing.map(x => x[1]))];
   },
+
+  // --- Read: verify a PDF selection -------------------------------------------
 
   onSelectionPopup({ reader, doc, params, append }) {
     const text = params?.annotation?.text;
@@ -1477,28 +1560,27 @@ Zotero.WorthYourRead = {
       h(doc, "div", {}, h(doc, "b", {}, row.sentence)),
       h(doc, "div", { style: "color:var(--fill-secondary);margin:2px 0 6px" }, `cites: ${row.cited.title}`));
     if (row.state !== "done") {
-      card.append(h(doc, "div", { style: row.state === "error" ? "color:#b3261e" : "color:var(--fill-secondary)" },
+      card.append(h(doc, "div", { style: row.state === "error" ? `color:${RED}` : "color:var(--fill-secondary)" },
         row.state === "error" ? row.error : row.state === "running" ? "Checking…"
           : row.state === "edited" ? "Edited — not checked yet." : "Waiting…"));
       return card;
     }
-    card.append(h(doc, "div", {}, badge(doc, v, VERDICT_COLOR[v] || "#666"),
-      ` ${r.band} (${r.confidence.toFixed(2)}) — ${r.summary || ""}`));
+    card.append(h(doc, "div", {}, verdictBadge(doc, v), ` ${bandText(r)} — ${r.summary || ""}`));
     if (row.revision) {
       card.append(h(doc, "div", { style: "margin-top:6px" }, h(doc, "b", {}, "Suggested wording: "),
-        row.revision.text, " ", badge(doc, row.revision.verdict || "?", VERDICT_COLOR[row.revision.verdict] || "#666")));
+        row.revision.text, " ", verdictBadge(doc, row.revision.verdict)));
     }
     for (const s of row.suggestions || []) {
       card.append(h(doc, "div", { style: "margin-top:4px" },
-        badge(doc, s.verdict, VERDICT_COLOR[s.verdict] || "#666"),
+        verdictBadge(doc, s.verdict),
         ` ${s.title} (${s.year || "n.d."}) `,
-        s.added ? h(doc, "span", { style: "color:#1b7f3b" }, "added and cited")
+        s.added ? h(doc, "span", { style: `color:${GREEN}` }, "added and cited")
           : h(doc, "button", { dataset: { action: "add-cite" }, onclick: () => this.addAndCite(draft, row, s) },
             s.verdict === "SUPPORTED" ? "Add to Zotero and cite"
-              : "Add and cite anyway (only partly supports this)")));
+              : "Add and cite anyway (only partly supports the claim)")));
     }
     if (row.busy) card.append(h(doc, "div", { style: "color:var(--fill-secondary)" }, row.busy));
-    if (row.error) card.append(h(doc, "div", { style: "color:#b3261e" }, row.error));
+    if (row.error) card.append(h(doc, "div", { style: `color:${RED}` }, row.error));
     const actions = h(doc, "div", { style: "display:flex;gap:6px;margin-top:8px" });
     if (v !== "SUPPORTED" && row.paper?.reference && !row.revision) {
       actions.append(h(doc, "button", { dataset: { action: "reword" },
@@ -1508,7 +1590,7 @@ Zotero.WorthYourRead = {
       actions.append(h(doc, "button", { dataset: { action: "apply" },
         onclick: () => this.applyRevision(draft, row) }, "Apply wording to the note"));
     }
-    if (row.revision?.applied) actions.append(h(doc, "span", { style: "color:#1b7f3b" }, "Applied to the note."));
+    if (row.revision?.applied) actions.append(h(doc, "span", { style: `color:${GREEN}` }, "Applied to the note."));
     if (v !== "SUPPORTED" && !row.suggestions) {
       actions.append(h(doc, "button", { dataset: { action: "find-source" },
         onclick: () => this.draftSuggest(draft, row) }, "Find a supporting source"));
@@ -1520,12 +1602,10 @@ Zotero.WorthYourRead = {
     card.append(actions);
     if (row.hl) {
       card.append(h(doc, "div", { style: "font-size:12px;color:var(--fill-secondary);margin-top:4px" }, row.hl, " ",
-        row.hlTemp ? h(doc, "button", { dataset: { action: "keep-highlights" }, onclick: async () => {
-          const n = await this.keepHighlights();
-          row.hl = `Kept ${n} highlight(s) permanently (tagged “${HL_TAG}”).`;
-          row.hlTemp = false;
+        row.hlTemp ? this.keepButton(doc, (msg) => {
+          Object.assign(row, { hl: msg, hlTemp: false });
           this.renderDraft(draft);
-        } }, "Keep highlights") : null));
+        }) : null));
     }
     return card;
   },
@@ -1537,8 +1617,7 @@ Zotero.WorthYourRead = {
       const { att } = await paperFor(row.cited.item);
       await this.clearTemporaryHighlights();
       const res = await this.highlight(att, verdictHighlights(row.result, row.sentence));
-      row.hl = res.message + (res.temporary && res.made
-        ? " They'll be removed at your next action or when you close the PDF." : "");
+      row.hl = highlightMessage(res);
       row.hlTemp = res.temporary && res.made > 0;
     }
     catch (e) { row.hl = e.message; }
@@ -1617,16 +1696,9 @@ Zotero.WorthYourRead = {
       const win = Zotero.getMainWindow();
       const doc = new win.DOMParser().parseFromString(note.getNote(), "text/html");
       const span = doc.querySelectorAll("span.citation[data-citation]")[row.index];
-      // Build the citation the way Zotero's note editor does: item URI plus
-      // CSL item data (without it the editor renders an empty "()").
-      const citationItem = { uris: [Zotero.URI.getItemURI(item)],
-        itemData: Zotero.Utilities.Item.itemToCSLJSON(item) };
-      const citation = { citationItems: [citationItem], properties: {} };
-      const cite = doc.createElement("span");
-      cite.className = "citation";
-      cite.dataset.citation = encodeURIComponent(JSON.stringify(citation));
-      cite.innerHTML = Zotero.EditorInstanceUtilities.formatCitation(citation);
-      span.after(doc.createTextNode(" "), cite);
+      const { citationItem, span: citeHTML } = citationFor(item);
+      span.insertAdjacentHTML("afterend", citeHTML);
+      span.after(doc.createTextNode(" "));
       const container = doc.querySelector("body > div[data-schema-version]");
       if (container) {
         let stored = [];

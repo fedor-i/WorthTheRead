@@ -31,31 +31,33 @@ BEDROCK_MODEL = os.environ.get("WYR_BEDROCK_MODEL", "").strip()
 # When WYR_USE_OLLAMA is truthy, the judge runs on a LOCAL Ollama model instead
 # of Claude. The Python quote-verification guard (judge.finalize) is identical
 # whichever backend produced the raw judgement, so a small local model stays
-# safe against fabricated support. Thinking is off unless WYR_OLLAMA_THINK turns
-# it on (below); when on, each call gets extra tokens so the reasoning doesn't
-# eat the answer.
+# safe against fabricated support.
 USE_OLLAMA = _truthy(os.environ.get("WYR_USE_OLLAMA", ""))
 OLLAMA_URL = os.environ.get("WYR_OLLAMA_URL", "http://localhost:11434").rstrip("/")
 OLLAMA_MODEL = os.environ.get("WYR_OLLAMA_MODEL", "gemma4:e4b")
-# How ask_many combines findings: "merge" lets the model choose what stays;
-# "ranked" groups them by embedding (EMBED_MODEL, pulled into Ollama) and ranks
-# the groups, so a small model only writes. Unset: ranked for a small gemma on
-# Ollama, whose merge drops findings to keep to 10 claims (RESULTS.md), merge
-# otherwise (WYR_COMBINE, set below SMALL_MODEL).
-EMBED_MODEL = os.environ.get("WYR_EMBED_MODEL", "nomic-embed-text")
 OLLAMA_NUM_CTX = int(os.environ.get("WYR_OLLAMA_NUM_CTX", "20000"))
 OLLAMA_NUM_PREDICT = int(os.environ.get("WYR_OLLAMA_NUM_PREDICT", "1500"))
 OLLAMA_TIMEOUT = float(os.environ.get("WYR_OLLAMA_TIMEOUT", "600"))
-# Let a gemma "thinking" model reason before it answers. Reasoning tokens come
-# out of num_predict, so each call gets this many more on top.
-# WYR_OLLAMA_THINK=1 thinks on every call; a comma list of steps (the function
-# that calls the model, e.g. "_merge,_vote") thinks only there.
-# Unset, a small gemma (e2b/e4b) thinks on the three steps it needs: without
-# it, its merge is vague, its short answer can come back empty and its wording
-# check flags nitpicks (benchmark/reviews/RESULTS.md). Larger models don't.
-SMALL_MODEL_THINK = "_merge,_overview,_unfaithful"
+# A small gemma (e2b/e4b). Its defaults below differ from a larger model's.
 SMALL_MODEL = bool(re.search(r":e\d+b", OLLAMA_MODEL))
+
+# How ask_many combines findings (WYR_COMBINE): "merge" lets the model choose
+# what stays; "ranked" groups them by embedding (EMBED_MODEL, pulled into
+# Ollama: `ollama pull nomic-embed-text`) and ranks the groups, so a small
+# model only writes. Without the embedding model, "ranked" falls back to the
+# merge. Unset: ranked for a small gemma on Ollama, whose merge drops findings
+# to keep to 10 claims (benchmark/reviews/RESULTS.md); merge otherwise.
+EMBED_MODEL = os.environ.get("WYR_EMBED_MODEL", "nomic-embed-text")
 COMBINE = os.environ.get("WYR_COMBINE", "ranked" if USE_OLLAMA and SMALL_MODEL else "merge")
+
+# Let a gemma "thinking" model reason before it answers (WYR_OLLAMA_THINK):
+# "1" thinks on every call; a comma list of steps (the function that calls the
+# model, e.g. "_merge,_vote") thinks only there; "0" never. Unset, a small
+# gemma thinks on the three steps it needs: without it, its merge is vague,
+# its short answer can come back empty and its wording check flags nitpicks
+# (benchmark/reviews/RESULTS.md). Larger models don't think. Reasoning tokens
+# come out of num_predict, so a thinking call gets OLLAMA_THINK_TOKENS more.
+SMALL_MODEL_THINK = "_merge,_overview,_unfaithful"
 _think = os.environ.get("WYR_OLLAMA_THINK", SMALL_MODEL_THINK if SMALL_MODEL else "").strip()
 OLLAMA_THINK = _think.lower() in ("1", "true", "yes", "on")
 OLLAMA_THINK_STEPS = set() if OLLAMA_THINK or _think.lower() in ("", "0", "false", "no", "off") else {x.strip() for x in _think.split(",") if x.strip()}

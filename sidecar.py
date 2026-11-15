@@ -27,13 +27,14 @@ from pydantic import BaseModel
 from . import __version__
 from . import answer as _answer
 from . import config as _config
+from . import fetch as _fetch
+from . import judge as _judge
 from . import library as _library
 from . import render as _render
-from . import research as _research_mod
+from . import research as _research
 from . import resolve as _resolve
 from . import server as _server
 from . import store as _store
-from . import fetch as _fetch
 
 PORT = int(os.environ.get("WYR_SIDECAR_PORT", "23120"))
 
@@ -69,126 +70,142 @@ class Paper(BaseModel):
 
 
 def _load(paper: Paper) -> tuple:
-    """(fetched, pages, resolved) — the local copy wins when it has text."""
-    fetched, pages, resolved = None, [], {}
+    """(fetched, pages): the local copy wins when it has text, else the
+    reference is resolved and fetched online."""
     if paper.attachment_key or paper.pdf_path:
         fetched = _library.load(paper.pdf_path, paper.attachment_key)
-        pages = fetched.get("pages") or []
-        if fetched.get("source") == "none":
-            fetched = None
-    if fetched is None and paper.reference:
-        resolved = _resolve.resolve(paper.reference, paper.title or None)
-        fetched = _fetch.fetch_text(resolved)
-    if fetched is None:
-        raise ValueError("No text for this paper: give an attachment_key, "
-                         "pdf_path or reference that can be read.")
-    return fetched, pages, resolved
+        if fetched.get("source") != "none":
+            return fetched, fetched.get("pages") or []
+    if paper.reference:
+        return _fetch.fetch_text(_resolve.resolve(paper.reference, paper.title or None)), []
+    raise ValueError("No text for this paper: give an attachment_key, "
+                     "pdf_path or reference that can be read.")
 
 
 # --- job bodies (run in the worker thread) ------------------------------------
+# Each calls the same core function as the MCP tool of the same name, with the
+# same defaults, and returns the same fields (plus `page` on quotes read from a
+# local PDF).
 
-def _verify(args: dict) -> dict:
-    paper = Paper(**args.get("paper", {}))
-    claim, passes = args["claim"], int(args.get("passes", 1))
-    if not (paper.attachment_key or paper.pdf_path):
-        # Online reference: the full MCP path (retraction, preprint, wrong paper).
-        return asyncio.run(_server._verify(claim, paper.reference, paper.title,
-                                           passes=passes))
-    fetched, pages, _ = _load(paper)
-    r = asyncio.run(_server._judge_consistent(None, claim, fetched, passes))
-    r.update({"claim": claim, "reference": paper.reference or paper.attachment_key
-              or paper.pdf_path, "fetch_source": fetched.get("source"),
-              "sections_available": fetched.get("sections_available", []),
-              "has_fulltext": fetched.get("has_fulltext", False),
-              "resolved": {"title": paper.title}})
-    _library.annotate_pages(r, pages)
+def _finish_verify(r: dict) -> dict:
+    """The fields server._verify adds, plus `distortion_label` (judge's label
+    for `distortion_type`, as the card shows it) for the plugin to show."""
     r["summary"] = _render.summary(r)
+    r["card"] = _render.render_card(r)
+    if r.get("verdict") == "OVERSTATED" and r.get("distortion_type") not in (None, "", "none"):
+        r["distortion_label"] = _judge.DISTORTION_LABELS.get(r["distortion_type"], r["distortion_type"])
     return r
 
 
-def _ask_many(args: dict) -> dict:
-    papers, failed, failed_keys = [], [], []
+def _job_verify(args: dict) -> dict:
+    """verify_claim. A paper with a local PDF is judged offline against it
+    (no resolve, so no retraction / preprint / wrong-paper check); one given
+    only by reference takes the full MCP path."""
+    paper = Paper(**args.get("paper", {}))
+    claim, passes = args["claim"], int(args.get("passes", 1))
+    if not (paper.attachment_key or paper.pdf_path):
+        return _finish_verify(asyncio.run(_server._verify(claim, paper.reference, paper.title,
+                                                          passes=passes)))
+    fetched, pages = _load(paper)
+    r = asyncio.run(_server._judge_consistent(None, claim, fetched, passes))
+    r.update({"claim": claim, "reference": paper.reference or paper.attachment_key or paper.pdf_path,
+              "citation_ok": None, "resolved": {"title": paper.title}, "retracted": False,
+              "concern": False, "fetch_source": fetched.get("source"),
+              "sections_available": fetched.get("sections_available", []),
+              "has_results": fetched.get("has_results", False),
+              "has_fulltext": fetched.get("has_fulltext", False),
+              "open_access": fetched.get("open_access", False)})
+    _library.annotate_pages(r, pages)
+    return _finish_verify(r)
+
+
+def _job_ask_many(args: dict) -> dict:
+    """ask_papers (server.ask_across), but over the plugin's papers: local
+    PDFs first, each labelled and keyed by its Zotero item."""
+    papers, left_out = [], []
     for spec in args.get("papers", []):
         paper = Paper(**spec)
         label = spec.get("label") or paper.title or paper.reference or paper.attachment_key
+        key = spec.get("item_key", "")
         try:
-            fetched, pages, _ = _load(paper)
-        except Exception:
-            failed.append(label)
-            failed_keys.append({"label": label, "key": spec.get("item_key", ""), "reason": "load_failed"})
+            fetched, pages = _load(paper)
+        except Exception as e:
+            left_out.append({"label": label, "key": key, "reason": f"load_failed: {type(e).__name__}"})
             continue
-        papers.append({"label": label, "key": spec.get("item_key", ""), "fetched": fetched, "pages": pages,
+        papers.append({"label": label, "key": key, "fetched": fetched, "pages": pages,
                        "doi": paper.reference if paper.reference.lower().startswith("10.") else ""})
 
     def follow(doi, title):
         # A paper an introduction cites, read online; not added to the library.
         return {"label": title or doi, "key": "", "doi": doi, "pages": [],
                 "fetched": _load(Paper(reference=doi, title=title))[0]}
-    max_papers = int(args.get("max_papers") or 0) or None
-    _research_mod.add_paper_facts(papers)          # citation counts pick papers; reviews don't vote
+    depth = args.get("depth") if args.get("depth") in _answer.DEPTHS else "standard"
+    _research.add_paper_facts(papers)          # citation counts pick papers; reviews don't vote
     r = _answer.ask_many(args["question"], papers, progress=args.get("_progress"),
-                         max_papers=max_papers,
-                         follow=follow, depth=args.get("depth") if args.get("depth") in _answer.DEPTHS else "standard")
-    r["skipped"] = failed + r["skipped"]
-    r["left_out"] = failed_keys + r["left_out"]
+                         max_papers=int(args.get("max_papers") or 0) or None,
+                         follow=follow, depth=depth)
+    r["skipped"] = [x["label"] for x in left_out] + r["skipped"]
+    r["left_out"] = left_out + r["left_out"]
+    r["summary"] = _render.ask_summary(r)
+    r["card"] = _render.ask_card(r)
     return r
 
 
-def _ask(args: dict) -> dict:
-    fetched, pages, _ = _load(Paper(**args.get("paper", {})))
+def _job_ask(args: dict) -> dict:
+    fetched, pages = _load(Paper(**args.get("paper", {})))
     r = _answer.ask(args["question"], fetched, check=bool(args.get("check")))
     return _library.annotate_pages(r, pages)
 
 
-def _summarize(args: dict) -> dict:
+def _job_summarize(args: dict) -> dict:
     paper = Paper(**args.get("paper", {}))
-    fetched, pages, _ = _load(paper)
+    fetched, pages = _load(paper)
     r = _library.annotate_pages(_answer.summarize(fetched, check=bool(args.get("check"))), pages)
     r["note_html"] = _answer.note_html(r, paper.title)
     return r
 
 
-def _revise(args: dict) -> dict:
+def _job_revise(args: dict) -> dict:
     return asyncio.run(_server.revise_claim(
         args["claim"], args["reference"], args.get("title", ""),
         max_rounds=int(args.get("max_rounds", 2)),
-        broaden=bool(args.get("broaden", False)), want=int(args.get("want", 2))))
+        broaden=bool(args.get("broaden", True)), want=int(args.get("want", 2))))
 
 
-def _suggest(args: dict) -> dict:
+def _job_suggest(args: dict) -> dict:
     return asyncio.run(_server._suggest_sources(
-        args["claim"], int(args.get("n", 2)), args.get("exclude", ""),
+        args["claim"], int(args.get("n", 3)), args.get("exclude", ""),
         int(args.get("breadth", 5)), None))
 
 
-def _locate(args: dict) -> dict:
+def _job_locate(args: dict) -> dict:
     """On-page rectangles of verified quotes, for highlight annotations."""
     paper = Paper(**args.get("paper", {}))
     return {"quotes": _library.locate_quotes(args.get("quotes", []),
                                              paper.attachment_key, paper.pdf_path)}
 
 
-def _research(args: dict) -> dict:
+def _job_research(args: dict) -> dict:
     """Snowball the citation graph from a question (or seed DOIs, for "find
     similar") until it runs dry; reports progress as it goes."""
-    return _research_mod.snowball(
+    return _research.snowball(
         args.get("question", ""), seed_dois=args.get("seed_dois", []),
         max_rounds=int(args.get("max_rounds", 8)), max_papers=int(args.get("max_papers", 200)),
         progress=args.get("_progress"))
 
 
-def _find(args: dict) -> dict:
-    return _server.find_sources(args["query"], int(args.get("limit", 8)))
+def _job_find(args: dict) -> dict:
+    return _server.find_sources(args["query"], int(args.get("limit", 3)))
 
 
-def _plan(args: dict) -> dict:
+def _job_plan(args: dict) -> dict:
     return _server.plan_search(args["question"], args.get("answers"))
 
 
-KINDS = {"verify": _verify, "ask": _ask, "summarize": _summarize,
-         "revise": _revise, "suggest": _suggest, "find": _find, "plan": _plan,
-         "locate": _locate, "research": _research,
-         "ask_many": _ask_many}
+KINDS = {"verify": _job_verify, "ask": _job_ask, "summarize": _job_summarize,
+         "ask_many": _job_ask_many, "revise": _job_revise, "suggest": _job_suggest,
+         "find": _job_find, "plan": _job_plan, "locate": _job_locate,
+         "research": _job_research}
 
 
 # --- jobs ----------------------------------------------------------------------
@@ -263,7 +280,7 @@ def health():
             "backend": "ollama" if _config.USE_OLLAMA else
                        ("bedrock" if _config.USE_BEDROCK else "api"),
             "model": _config.OLLAMA_MODEL if _config.USE_OLLAMA else _config.MODEL,
-            "ollama_up": ollama_up, "disk_cache": _store.enabled(),
+            "combine": _config.COMBINE, "ollama_up": ollama_up, "disk_cache": _store.enabled(),
             "queued": sum(1 for j in _jobs.values() if j["status"] in ("queued", "running"))}
 
 

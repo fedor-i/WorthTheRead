@@ -1,36 +1,43 @@
 """Worth Your Read — MCP server.
 
-Tools an agent can call to vet its own citations:
-  - verify_claim(claim, reference): resolve + retraction check + fetch real
-    results + judge with quote-verified evidence. Returns structured fields
-    plus a ready-to-show markdown `card`.
-  - score_answer(claims): aggregate verdicts into an overall confidence score
-    and a ranked "worth your read" source list.
+Tools an agent can call to vet its own citations (each result leads with a
+plain-English `summary` and a markdown `card`; see the contract in render.py):
+  - verify_claim: resolve the reference, check retraction, fetch the real
+    results and judge the claim with quote-verified evidence.
+  - revise_claim / suggest_sources: fix a weak claim (reword it to the
+    evidence, add corroborating papers) or find a citation that supports it.
+  - score_answer: verify many claims; overall grade + ranked "worth your read".
+  - audit_paper: check a paper's own cited sentences against their sources.
+  - find_sources / plan_search: discover papers; scope a question first.
+  - ask_papers: answer a question from several papers, every finding quoted.
 
 The judge runs "through this chat" by default: the server asks the HOST's model
-via MCP sampling (no API key, no local model). If the client doesn't support
-sampling, it falls back to an ANTHROPIC_API_KEY / Bedrock call, and if neither
-is available it returns INSUFFICIENT with a clear note. The quote-verification
-guard runs regardless of backend.
+via MCP sampling (no API key, no local model). With WYR_USE_OLLAMA set it runs
+on a local Ollama model instead. If the client doesn't support sampling, it
+falls back to an ANTHROPIC_API_KEY / Bedrock call, and if neither is available
+it returns INSUFFICIENT with a clear note. The quote-verification guard runs
+regardless of backend.
 
 Run (stdio):  python -m worth_your_read.server
 """
+import asyncio
 import re
 from collections import Counter
 
 from mcp.server.fastmcp import Context, FastMCP
+from mcp.types import SamplingMessage, TextContent
 
+from . import answer as _answer
+from . import audit as _audit
 from . import config as _config
-from . import resolve as _resolve
+from . import discover as _discover
 from . import fetch as _fetch
 from . import judge as _judge
-from . import score as _score
-from . import render as _render
 from . import plan as _plan
-from . import discover as _discover
-from . import audit as _audit
-from . import answer as _answer
+from . import render as _render
 from . import research as _research
+from . import resolve as _resolve
+from . import score as _score
 
 mcp = FastMCP("worth-your-read", instructions=(
     "Verify scientific claims against the papers they cite, grounded in the "
@@ -53,6 +60,15 @@ mcp = FastMCP("worth-your-read", instructions=(
     "papers, each finding quoted and checked word for word (slow)."))
 
 
+async def _sample(ctx, system: str, user: str, max_tokens: int) -> str:
+    """Ask the host's model via MCP sampling; returns its text ("" if none)."""
+    res = await ctx.session.create_message(
+        messages=[SamplingMessage(role="user",
+                                  content=TextContent(type="text", text=user))],
+        system_prompt=system, max_tokens=max_tokens)
+    return getattr(res.content, "text", "") or ""
+
+
 async def _run_judge(ctx, claim: str, fetched: dict) -> dict:
     """Local Ollama (opt-in) first; else host sampling; else api/bedrock."""
     if not fetched.get("full_text"):
@@ -71,28 +87,18 @@ async def _run_judge(ctx, claim: str, fetched: dict) -> dict:
             return r
 
     # 1) Through this chat: ask the host's model via MCP sampling.
+    sampling_error = "no client context"
     if ctx is not None:
         try:
-            from mcp.types import SamplingMessage, TextContent
-            res = await ctx.session.create_message(
-                messages=[SamplingMessage(
-                    role="user",
-                    content=TextContent(type="text",
-                                        text=_judge.build_user(claim, fetched)))],
-                system_prompt=_judge.sampling_system(),
-                max_tokens=1500,
-            )
-            text = getattr(res.content, "text", "") or ""
+            text = await _sample(ctx, _judge.sampling_system(),
+                                 _judge.build_user(claim, fetched), 1500)
             if text.strip():
                 out = _judge.parse_json_verdict(text, fetched, claim)
                 out["judge_backend"] = "client_sampling"
                 return out
+            sampling_error = "empty sampling response"
         except Exception as e:
-            _sampling_error = str(e)
-        else:
-            _sampling_error = "empty sampling response"
-    else:
-        _sampling_error = "no client context"
+            sampling_error = str(e)
 
     # 2) Fallback: ANTHROPIC_API_KEY / Bedrock.
     try:
@@ -103,13 +109,14 @@ async def _run_judge(ctx, claim: str, fetched: dict) -> dict:
         # 3) No judge backend at all — be honest.
         r = _judge.no_text_result(
             "No judge backend available: the client did not support sampling "
-            f"({_sampling_error}) and no API/Bedrock credentials are set "
+            f"({sampling_error}) and no API/Bedrock credentials are set "
             f"({e}). Retrieval and retraction checks still ran.")
         r["judge_backend"] = "none"
         return r
 
 
 _GENEROSITY = {"SUPPORTED": 3, "OVERSTATED": 2, "UNSUPPORTED": 1, "INSUFFICIENT": 0}
+_NO_JUDGE = ("none", "n/a", None)   # judge_backend values where no judge ran
 
 
 def _reconcile(results: list) -> dict:
@@ -139,7 +146,7 @@ async def _judge_consistent(ctx, claim: str, fetched: dict, passes: int) -> dict
     where the judge varies most) is judged twice more and put to the vote."""
     if passes == 0:
         first = await _run_judge(ctx, claim, fetched)
-        if first.get("judge_backend") in ("none", "n/a", None) or (
+        if first.get("judge_backend") in _NO_JUDGE or (
                 first.get("band") == "High" and first.get("verdict") != "OVERSTATED"):
             return first
         results = [first] + [await _run_judge(ctx, claim, fetched) for _ in range(2)]
@@ -148,13 +155,21 @@ async def _judge_consistent(ctx, claim: str, fetched: dict, passes: int) -> dict
     if passes == 1:
         return await _run_judge(ctx, claim, fetched)
     results = [await _run_judge(ctx, claim, fetched) for _ in range(passes)]
-    if all(r.get("judge_backend") in ("none", "n/a", None) for r in results):
+    if all(r.get("judge_backend") in _NO_JUDGE for r in results):
         return results[0]   # no backend actually ran — don't fake a vote
     return _reconcile(results)
 
 
+def _finish(result: dict) -> dict:
+    """Add the plain-English summary and the markdown card to a verdict."""
+    result["summary"] = _render.summary(result)
+    result["card"] = _render.render_card(result)
+    return result
+
+
 async def _verify(claim: str, reference: str, expected_title: str = "",
                   ctx=None, evidence_text: str = "", passes: int = 1) -> dict:
+    """verify_claim's core, shared by every tool, the web app and the sidecar."""
     # Supplied-text mode: judge the claim against text handed in directly (a
     # pasted passage, or a benchmark's gold abstract) with no DOI fetch. The
     # quote-verification guard still runs against this text.
@@ -173,9 +188,7 @@ async def _verify(claim: str, reference: str, expected_title: str = "",
             "has_results": False, "has_fulltext": False, "open_access": False,
             "fetch_source": "supplied_text", "resolve_error": None,
         })
-        result["summary"] = _render.summary(result)
-        result["card"] = _render.render_card(result)
-        return result
+        return _finish(result)
 
     resolved = _resolve.resolve(reference, expected_title or None)
 
@@ -225,9 +238,7 @@ async def _verify(claim: str, reference: str, expected_title: str = "",
         "fetch_source": fetched.get("source"),
         "resolve_error": resolved.get("error"),
     })
-    result["summary"] = _render.summary(result)
-    result["card"] = _render.render_card(result)
-    return result
+    return _finish(result)
 
 
 @mcp.tool()
@@ -281,21 +292,15 @@ async def score_answer(claims: list, min_confidence: float = 0.0,
     grade, the ranked "worth your read" list with links, and every claim's
     verdict card). Off by default so the response stays compact.
     """
-    results = []
-    for c in claims:
-        results.append(await _verify(c.get("claim", ""), c.get("reference", ""),
-                                     c.get("expected_title", ""), ctx))
-    summary = _score.score_answer(results, min_confidence=min_confidence)
-    sup = summary.get("counts", {}).get("SUPPORTED", 0)
-    summary["summary"] = (
-        f"Grade {summary['grade']} ({summary['overall_confidence']:.2f}): "
-        f"{sup}/{summary['n_claims']} claims supported, "
-        f"{len(summary.get('worth_your_read', []))} source(s) worth reading.")
-    summary["card"] = _render.render_scorecard(summary)
-    summary["claims"] = results
+    results = [await _verify(c.get("claim", ""), c.get("reference", ""),
+                             c.get("expected_title", ""), ctx) for c in claims]
+    scored = _score.score_answer(results, min_confidence=min_confidence)
+    scored["summary"] = _render.score_summary(scored)
+    scored["card"] = _render.render_scorecard(scored)
+    scored["claims"] = results
     if html:
-        summary["html"] = _render.scorecard_html(summary, results)
-    return summary
+        scored["html"] = _render.scorecard_html(scored, results)
+    return scored
 
 
 async def _run_revise(ctx, claim: str, result: dict):
@@ -308,16 +313,8 @@ async def _run_revise(ctx, claim: str, result: dict):
             return None
     if ctx is not None:
         try:
-            from mcp.types import SamplingMessage, TextContent
-            res = await ctx.session.create_message(
-                messages=[SamplingMessage(
-                    role="user",
-                    content=TextContent(type="text",
-                                        text=_judge.build_revise_user(claim, result)))],
-                system_prompt=_judge.revise_system(),
-                max_tokens=400,
-            )
-            text = getattr(res.content, "text", "") or ""
+            text = await _sample(ctx, _judge.revise_system(),
+                                 _judge.build_revise_user(claim, result), 400)
             if text.strip():
                 return _judge._clean_revision(text)
         except Exception:
@@ -358,7 +355,20 @@ def _worst_result(results: list) -> dict:
     return results[0]
 
 
+def _ref_id(r: dict) -> str:
+    """The identifier a verdict was checked against: DOI, else PMCID, else
+    the reference as given."""
+    res = r.get("resolved") or {}
+    return res.get("doi") or res.get("pmcid") or r.get("reference")
+
+
+def _cand_key(c: dict) -> str:
+    """Dedupe key for a discovered candidate (lowercased DOI or PMCID)."""
+    return (c.get("doi") or c.get("pmcid") or "").lower()
+
+
 def _cited_keys(results: list) -> set:
+    """Lowercased DOIs and PMCIDs already cited by these verdicts."""
     keys = set()
     for r in results:
         res = r.get("resolved") or {}
@@ -436,7 +446,9 @@ def find_sources(query: str, limit: int = 3, scope: str = "",
         "via_trail": c.get("providers") == ["openalex-cite"],
         "open_access": c.get("is_oa"), "trust_score": round(c.get("_score", 0), 2),
     } for c in cands]
-    return {"query": query, "count": len(sources), "sources": sources}
+    out = {"query": query, "count": len(sources), "sources": sources}
+    return {"summary": _render.sources_summary(out), **out,
+            "card": _render.sources_card(out)}
 
 
 @mcp.tool()
@@ -493,9 +505,7 @@ async def revise_claim(claim: str, reference: str, expected_title: str = "",
                 current = revised
                 re_results = []
                 for r in results:
-                    res = r.get("resolved") or {}
-                    ref_id = res.get("doi") or res.get("pmcid") or r.get("reference")
-                    nv = await _verify(current, ref_id, "", ctx)
+                    nv = await _verify(current, _ref_id(r), "", ctx)
                     nv["discovered"] = r.get("discovered", False)
                     re_results.append(nv)
                 results = re_results
@@ -505,27 +515,16 @@ async def revise_claim(claim: str, reference: str, expected_title: str = "",
                                       want - discovered_supporting(), ctx)
             if fresh:
                 results.extend(fresh)
-                for f in fresh:
-                    res = f.get("resolved") or {}
-                    added_refs.append(res.get("doi") or res.get("pmcid")
-                                      or f.get("reference"))
+                added_refs += [_ref_id(f) for f in fresh]
                 changed = True
         if not changed:
             break
 
     agg = _aggregate(results)
     primary = results[0]
-    revised = _judge._norm(current) != _judge._norm(claim)
-    start_v = trail[0]["verdict"] if trail else agg["verdict"]
-    if revised:
-        msg = (f"Rewrote the claim ({start_v} → {agg['verdict']}); "
-               f"now backed by {agg['support_count']} source(s) ({agg['strength']}).")
-    else:
-        msg = (f"Claim unchanged ({agg['verdict']}); "
-               f"{agg['support_count']} supporting source(s).")
-    return {
-        "revised": revised,
-        "summary": msg,
+    out = {
+        "revised": _judge._norm(current) != _judge._norm(claim),
+        "summary": "",
         "original_claim": claim,
         "claim": current,
         "verdict": agg["verdict"],
@@ -537,8 +536,11 @@ async def revise_claim(claim: str, reference: str, expected_title: str = "",
         "revisions": trail,
         "references": results,
         "verification": primary,
-        "card": primary.get("card"),
+        "card": "",
     }
+    out["summary"] = _render.revise_summary(out)
+    out["card"] = _render.revise_card(out)
+    return out
 
 
 _STOP = set(
@@ -575,18 +577,17 @@ async def _suggest_sources(claim: str, n: int, exclude: str, breadth: int,
     skip = (exclude or "").lower().strip().replace("doi:", "")
     pool = max(12, breadth * 3)   # discovery is cheap; cast wide, verify few
     cands = _discover.discover_sources(claim, n=pool)
-    seen = {(c.get("doi") or c.get("pmcid") or "").lower() for c in cands}
+    seen = {_cand_key(c) for c in cands}
     kw = _keywords(claim)
     if kw and kw.lower() != claim.lower():
         for c in _discover.discover_sources(kw, n=pool):
-            key = (c.get("doi") or c.get("pmcid") or "").lower()
+            key = _cand_key(c)
             if key and key not in seen:
                 seen.add(key)
                 cands.append(c)
     # Triage on title + abstract first: full verification is the expensive
     # step, so spend it on the few candidates most likely to support the claim.
-    cands = [c for c in cands
-             if (c.get("doi") or c.get("pmcid") or "").lower() != skip]
+    cands = [c for c in cands if _cand_key(c) != skip]
     cands = _discover.triage(claim, cands, keep=breadth)
     found, checked = [], 0
     for c in cands:
@@ -608,14 +609,9 @@ async def _suggest_sources(claim: str, n: int, exclude: str, breadth: int,
             break
     found.sort(key=lambda x: (x["verdict"] != "SUPPORTED", -(x["confidence"] or 0)))
     found = found[:n + 2]
-    sup = [s for s in found if s["verdict"] == "SUPPORTED"]
-    if sup:
-        msg = (f"Found {len(sup)} supporting source(s) out of {checked} checked — "
-               f"best: {(sup[0].get('title') or sup[0].get('doi') or '?')[:60]}.")
-    else:
-        msg = f"No supporting source found in {checked} candidates checked."
-    return {"claim": claim, "checked": checked, "count": len(found),
-            "summary": msg, "suggested": found}
+    out = {"claim": claim, "checked": checked, "count": len(found), "suggested": found}
+    return {"summary": _render.suggest_summary(out), **out,
+            "card": _render.suggest_card(out)}
 
 
 @mcp.tool()
@@ -659,6 +655,9 @@ async def audit_paper(reference: str, max_claims: int = 8,
         reference: DOI / PMID / PMCID of the paper to audit.
         max_claims: cap on cited sentences to check (each is a judge call).
         section: section-title keyword to audit ("introduc", "discuss", ...).
+        passes: self-consistency passes per claim, as in verify_claim.
+        fix: for each claim its citation doesn't support, suggest a source
+            that does (attached as the claim's `suggestion`).
     """
     async def vf(claim, ref):
         return await _verify(claim, ref, ctx=ctx, passes=passes)
@@ -678,18 +677,7 @@ async def audit_paper(reference: str, max_claims: int = 8,
                 if top:  # only offer a genuinely supporting replacement
                     c["suggestion"] = top
 
-    if out.get("available"):
-        from collections import Counter as _C
-        cc = _C(c.get("verdict") for c in out.get("claims", []))
-        nsup = cc.get("SUPPORTED", 0)
-        nfix = sum(1 for c in out.get("claims", []) if c.get("suggestion"))
-        out["summary"] = (
-            f"Audited {len(out.get('claims', []))} cited claims in the "
-            f"{section}: {nsup} supported, "
-            f"{len(out.get('claims', [])) - nsup} not fully supported"
-            + (f"; suggested a replacement for {nfix}." if nfix else "."))
-    else:
-        out["summary"] = out.get("note", "Could not audit this paper.")
+    out["summary"] = _render.audit_summary(out)
     out["card"] = _audit._render(out)
     return out
 
@@ -697,8 +685,8 @@ async def audit_paper(reference: str, max_claims: int = 8,
 def ask_across(question: str, references: list = None, max_papers: int = 6,
                depth: str = "standard", progress=None) -> dict:
     """Answer a question from several papers (answer.ask_many): each paper is
-    read, its findings quoted and checked word for word, then merged into a
-    few claims with their sources and a short answer. With no references, the
+    read, its findings quoted and checked word for word, then combined into
+    claims with their sources and a short answer. With no references, the
     top `max_papers` papers find_sources returns for the question are read."""
     refs = [r for r in (references or []) if str(r).strip()]
     if not refs:
@@ -724,6 +712,7 @@ def ask_across(question: str, references: list = None, max_papers: int = 6,
     r["skipped"] = [x["label"] for x in left_out] + r["skipped"]
     r["left_out"] = left_out + r["left_out"]
     r["summary"] = _render.ask_summary(r)
+    r["card"] = _render.ask_card(r)
     return r
 
 
@@ -734,7 +723,8 @@ async def ask_papers(question: str, references: list = None, max_papers: int = 6
     finding quoted from a paper and the quote checked word for word.
 
     Each paper is read for what it says on the question; the findings are
-    merged into a few claims, each listing the papers (and quotes) behind it,
+    combined into claims (merged by the model, or grouped by meaning and
+    ranked; see WYR_COMBINE), each listing the papers (and quotes) behind it,
     the papers that disagree, and a short answer on top. Claims no quote backs
     are marked UNGROUNDED; numbers no quote contains are flagged.
 
@@ -749,12 +739,12 @@ async def ask_papers(question: str, references: list = None, max_papers: int = 6
         depth: "quick", "standard" or "deep" (deep also reads key papers the
             chosen ones' introductions cite).
     """
-    import asyncio
     try:
         return await asyncio.to_thread(ask_across, question, references, max_papers, depth)
     except Exception as e:
+        msg = _render.ask_error(e)
         return {"question": question, "error": f"{type(e).__name__}: {e}",
-                "summary": "Couldn't answer: " + str(e)}
+                "summary": msg, "card": msg}
 
 
 @mcp.tool()
@@ -769,7 +759,9 @@ def plan_search(question: str, answers: dict = None) -> dict:
         a min_confidence threshold, and a target candidate count to feed into
         verify_claim / score_answer.
     """
-    return _plan.plan_search(question, answers)
+    out = _plan.plan_search(question, answers)
+    out["summary"] = _render.plan_summary(out)
+    return out
 
 
 def main():

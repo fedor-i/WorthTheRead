@@ -98,7 +98,8 @@ First run of both local models on the three test reviews, which no prompt was
 tuned on (senescence, aerosol, long-covid; 30 key statements in the papers
 read), with today's defaults (e4b thinks on merge, short answer and wording
 check). Statements fully present ("yes"), judged by Claude Opus 4.5; "earlier"
-is the committed 26b answer from an older version of the pipeline:
+is the committed 26b answer from an older version of the pipeline. The ranked
+row is discussed in the next section.
 
 | Run | Time, all three | Findings | Evidence | Short answer | Short, yes or partly |
 |---|---|---|---|---|---|
@@ -113,12 +114,12 @@ is the committed 26b answer from an older version of the pipeline:
   aerosol, where 6 of the 40 papers differed and 14 gave no finding.
 - e4b finds as much as 26b in the papers, but its merge loses it: evidence 4
   against 9, and no statement fully in the short answer. That is the same weak
-  step seen on ferroptosis, now beyond the judge's noise.
+  step seen on ferroptosis, now beyond the judge's noise. Asking the merge to
+  keep named molecules, genes, sites and methods (2026-11-13) did not lift
+  e4b's evidence (4 again); short answer 0 to 2 is within run noise. The
+  merge's loss is not just vague wording.
 - e4b was not faster here: thinking on the merge was half its time. Its gain is
   memory, not speed.
-- Asking the merge to keep named molecules, genes, sites and methods
-  (2026-11-13) did not lift e4b's evidence (4 again); short answer 0 to 2 is
-  within run noise. The merge's loss is not just vague wording.
 
 ## Update: a faster loop for the merge (2026-11-14)
 
@@ -136,13 +137,13 @@ papers read, same findings throughout:
 | replay, merge batch 12 | 4293 s | 6 | 4 | 3 | 7 |
 | replay, ranked (below) | 78 s | 6 | 4 | 2 | 6 |
 
-- Same findings, same prompt: evidence moves by 1 and the short answer by up
-  to 3 between runs, so one replay only shows a change of 2 or more.
+- Noise: with the same findings and the same prompt, evidence moves by 1 and
+  the short answer by up to 3 between runs, so one replay only shows a change
+  of 2 or more. e4b is deterministic at temperature 0: the two batch-12
+  replays wrote the same text word for word and still scored evidence 5 and 4.
+  Much of the spread is the Opus judge, not the model.
 - Merge batch 12 (against 24) is no better on evidence and five times slower
   (more merge rounds, each thinking). MERGE_BATCH stays 24.
-- e4b is deterministic at temperature 0: the two batch-12 replays wrote the
-  same text word for word and still scored evidence 5 and 4. Much of the
-  spread is the Opus judge, not the model.
 - Ranked (`ask_many(method="ranked")`): no model chooses what stays. Findings
   are grouped by meaning (nomic-embed-text, cosine 0.85), groups ranked by
   papers backing them (log) and closeness to the question, less a penalty for
@@ -150,9 +151,16 @@ papers read, same findings throughout:
   shown at most 5 of its findings (a whole group of 26 made it write one
   run-on sentence that broke the JSON). Same coverage as the merge (evidence
   4), in 78 s against 879 s: the merge was the thinking step.
-- On the sealed test reviews (table above), e4b ranked kept the merge's
-  evidence (4) and short answer (2) in half the time (1819 s against 3927 s);
-  findings (7 against 10) and short, yes or partly (8 against 12) came out
-  lower. Findings don't depend on how they are combined (every finding is
-  still listed), so that gap is most likely judge noise on a long list, not
-  lost facts; ranked looks a wash on coverage, is faster, and drops nothing silently. Kept apart in answers/ranked.
+- On the sealed test reviews (table in the previous section), e4b ranked kept
+  the merge's evidence (4) and short answer (2) in half the time (1819 s
+  against 3927 s). Findings (7 against 10) and short, yes or partly (8 against
+  12) came out lower, but findings don't depend on how they are combined
+  (every finding is still listed), so that gap is most likely judge noise on a
+  long list, not lost facts. Ranked looks a wash on coverage, is faster, and
+  drops nothing silently.
+- Twenty ranked sentences instead of ten (replays on the same e4b findings,
+  test reviews, 30 statements): evidence yes or partly 16 against 9, yes 3
+  against 4; short answer about the same (yes 1 against 2; yes or partly 8 and 8). The committed
+  26b answers (24 to 40 claims) have 23 and 6. On ferroptosis: 11 against 8.
+  RANK_TOP is now 20: the gap to 26b is mostly list length, and twenty closes
+  about half of it.

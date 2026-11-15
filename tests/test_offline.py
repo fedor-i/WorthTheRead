@@ -226,10 +226,8 @@ def test_ask_many_merges_many_findings_in_parts(monkeypatch):
     # claims, every paper is still read, and the final claim rests on papers
     # from different parts.
     monkeypatch.setattr(answer, "MERGE_BATCH", 8)
-    sizes, checks_with_parts = [], []
+    sizes = []
     def complete(system, user, max_tokens=1500):
-        if system == answer._PART_SYSTEM:
-            checks_with_parts.append(user)
         if system != answer._MERGE_SYSTEM:
             return json.dumps({"claims": [{"claim": "Users lived longer.",
                                            "quotes": ["metformin users lived longer than matched controls"]}]})
@@ -239,9 +237,8 @@ def test_ask_many_merges_many_findings_in_parts(monkeypatch):
         return json.dumps({"claims": [{"claim": "Merged.", "from": ["C1", "C2"]}]})
     monkeypatch.setattr(answer, "_complete", complete)
     papers = [_paper(f"P{i}", _B_TEXT) for i in range(30)]
-    r = answer.ask_many("Did users live longer?", papers, method="merge_whole")
+    r = answer.ask_many("Did users live longer?", papers)
     assert len(r["papers"]) == 30 and not r["skipped"] and max(sizes) <= 8
-    assert not checks_with_parts          # merging in parts must not switch the check variant
     main = [c for c in r["claims"] if not c["extra"]]
     assert len(main) == 1 and len({s["paper"] for s in main[0]["sources"]}) == 4
     # nothing is lost: every paper's finding is in the answer, merged or as a further finding
@@ -255,14 +252,14 @@ def test_ask_many_prunes_findings_that_do_not_back_the_merged_claim(monkeypatch)
     base = _fake_model(merge)
     asked = []
     def complete(system, user, max_tokens=1500):
-        if system == answer._SUPPORT_SYSTEM:
+        if system == answer._PART_SYSTEM:
             asked.append(user)
-            return json.dumps({"support": ["C1"] if "12%" in user.split("FINDINGS")[0] else []})
+            return json.dumps({"all": ["C1"] if "12%" in user.split("FINDINGS")[0] else []})
         return base(system, user, max_tokens)
     monkeypatch.setattr(answer, "_complete", complete)
     seen = []
     r = answer.ask_many("Does metformin extend life?", [_paper("Trial A", _A_TEXT), _paper("Cohort B", _B_TEXT)],
-                        progress=seen.append, method="merge_whole")
+                        progress=seen.append)
     first, second = r["claims"][0], r["claims"][1]
     assert {s["paper"] for s in first["sources"]} == {1}
     assert second["status"] == "UNGROUNDED" and not second["sources"]
@@ -271,29 +268,18 @@ def test_ask_many_prunes_findings_that_do_not_back_the_merged_claim(monkeypatch)
     assert len(asked) == 2 and [p["stage"] for p in seen].count("check") == 2
     # A check that doesn't answer leaves the merge's ids as they were.
     monkeypatch.setattr(answer, "_complete", lambda s, u, max_tokens=1500:
-                        "garbled" if s == answer._SUPPORT_SYSTEM else base(s, u, max_tokens))
-    r = answer.ask_many("Does metformin extend life?", [_paper("Trial A", _A_TEXT), _paper("Cohort B", _B_TEXT)],
-                        method="merge_whole")
+                        "garbled" if s == answer._PART_SYSTEM else base(s, u, max_tokens))
+    r = answer.ask_many("Does metformin extend life?", [_paper("Trial A", _A_TEXT), _paper("Cohort B", _B_TEXT)])
     assert {s["paper"] for s in r["claims"][0]["sources"]} == {1, 2}
 
 
-def test_ask_many_grouped_cites_exactly_each_group(monkeypatch):
-    base = _fake_model("{}")
-    def complete(system, user, max_tokens=1500):
-        if system == answer._GROUP_SYSTEM:      # C1 = trial mortality, C2 = cohort; C9 is junk
-            return json.dumps({"groups": [{"ids": ["C1", "C9"]}, {"ids": ["C1"]}]})
-        if system == answer._WRITE_SYSTEM:
-            return json.dumps({"claims": [{"group": "G1", "claim": "Mortality fell by 12% [P1]."},
-                                          {"group": "G1", "claim": "Written twice."}]})
-        return base(system, user, max_tokens)
-    monkeypatch.setattr(answer, "_complete", complete)
-    r = answer.ask_many("Does metformin extend life?", [_paper("Trial A", _A_TEXT), _paper("Cohort B", _B_TEXT)],
-                        method="grouped")
-    main = [c for c in r["claims"] if not c["extra"]]
-    assert [c["claim"] for c in main] == ["Mortality fell by 12%."]
-    assert {s["paper"] for s in main[0]["sources"]} == {1}
-    # C2, left out of every group by the model, became its own group; unwritten, it stays a further finding
-    assert [c["claim"] for c in r["claims"] if c["extra"]] == ["Users lived longer."]
+def test_the_whole_sentence_check_keeps_only_what_backs_it(monkeypatch):
+    # Not on the answer's path (it uses the part check), but the benchmark compares the two.
+    found = [(1, "Mortality fell by 12%.", ["q"]), (2, "Users lived longer.", ["q"])]
+    monkeypatch.setattr(answer, "_complete", lambda s, u, max_tokens=1500: json.dumps({"support": ["C1"]}))
+    assert answer._supporting("Mortality fell by 12%.", found, {0, 1}) == {0}
+    monkeypatch.setattr(answer, "_complete", lambda s, u, max_tokens=1500: "garbled")
+    assert answer._supporting("Mortality fell by 12%.", found, {0, 1}) == {0, 1}
 
 
 def test_ask_many_parts_keeps_a_finding_that_backs_half_the_sentence(monkeypatch):
@@ -303,14 +289,9 @@ def test_ask_many_parts_keeps_a_finding_that_backs_half_the_sentence(monkeypatch
         if system == answer._PART_SYSTEM:
             return json.dumps({"findings": [{"id": "C1", "backs": "part", "part": "Mortality fell by 12%"},
                                             {"id": "C2", "backs": "part", "part": "words not in the sentence"}]})
-        if system == answer._SUPPORT_SYSTEM:
-            return json.dumps({"support": []})     # the whole-sentence check keeps neither
         return base(system, user, max_tokens)
     monkeypatch.setattr(answer, "_complete", complete)
-    papers = [_paper("Trial A", _A_TEXT), _paper("Cohort B", _B_TEXT)]
-    strict = answer.ask_many("Does metformin extend life?", papers, method="merge_whole")
-    assert strict["claims"][0]["status"] == "UNGROUNDED"
-    r = answer.ask_many("Does metformin extend life?", papers)            # the part check is the default
+    r = answer.ask_many("Does metformin extend life?", [_paper("Trial A", _A_TEXT), _paper("Cohort B", _B_TEXT)])
     first = r["claims"][0]
     assert first["status"] == "GROUNDED" and {s["paper"] for s in first["sources"]} == {1, 2}
     # a part the model made up isn't placed; the source is still cited (at the end)
@@ -936,3 +917,85 @@ def test_ranked_falls_back_to_the_merge_without_embeddings(monkeypatch):
     monkeypatch.setattr(answer, "_embed", lambda texts: None)
     monkeypatch.setattr(answer, "_combine_merge", lambda *a, **k: ("merged", [], False))
     assert answer._combine_ranked("How?", [], [(1, "x", [])], lambda **k: None) == ("merged", [], False)
+
+
+# --- MCP result contract (render.py header): every tool leads with summary + card
+
+def _fake_verdict(claim, ref, verdict="SUPPORTED", conf=0.8):
+    from worth_your_read import server
+    r = {"verdict": verdict, "confidence": conf, "band": "High", "claim": claim,
+         "reference": ref, "resolved": {"title": "T " + ref, "doi": ref},
+         "aspects": [], "evidence": [{"quote": "q", "close_match": True}],
+         "rationale": "Because.", "has_fulltext": True, "citation_ok": True,
+         "judge_backend": "api", "claim_aspects_unmet": []}
+    return server._finish(r)
+
+
+@pytest.fixture
+def offline_server(monkeypatch):
+    import asyncio
+    from worth_your_read import server
+
+    async def fake_verify(claim, reference, expected_title="", ctx=None, evidence_text="", passes=1):
+        return _fake_verdict(claim, reference, "SUPPORTED" if "good" in reference else "OVERSTATED", 0.7)
+    cands = [{"doi": "10.1/good1", "title": "Good one", "year": 2020, "venue": "J",
+              "citations": 5, "providers": ["openalex"], "_score": 1.0},
+             {"doi": "10.1/meh", "title": "Meh", "year": 2019, "providers": ["crossref"], "_score": 0.5}]
+    monkeypatch.setattr(server, "_verify", fake_verify)
+    monkeypatch.setattr(server._discover, "discover_sources", lambda q, n=3, **k: [dict(c) for c in cands])
+    monkeypatch.setattr(server._discover, "triage", lambda claim, cs, keep=5: cs[:keep])
+    monkeypatch.setattr(server, "_run_revise", lambda *a: asyncio.sleep(0, result=None))
+    return server
+
+
+def test_every_tool_result_has_a_summary_and_a_card(offline_server, monkeypatch):
+    import asyncio
+    server = offline_server
+    run = asyncio.run
+    results = {
+        "verify_claim": run(server.verify_claim("c", "10.1/good1")),
+        "score_answer": run(server.score_answer([{"claim": "c", "reference": "10.1/good1"}])),
+        "revise_claim": run(server.revise_claim("c", "10.1/meh", max_rounds=1)),
+        "suggest_sources": run(server.suggest_sources("c", exclude="10.1/meh")),
+        "find_sources": server.find_sources("c"),
+        "plan_search": server.plan_search("Does X help Y?"),
+        "plan_search(answers)": server.plan_search("Does X help Y?", {"study_type": "RCT"}),
+    }
+    monkeypatch.setattr(server._audit, "run_audit", lambda *a, **k: asyncio.sleep(0, result={
+        "paper": {"title": "P"}, "section": "introduc", "available": False, "claims": [],
+        "note": "No open-access full text."}))
+    results["audit_paper"] = run(server.audit_paper("10.1/x"))
+    monkeypatch.setattr(server, "ask_across", lambda *a: (_ for _ in ()).throw(RuntimeError("boom")))
+    results["ask_papers"] = run(server.ask_papers("q?"))
+    for name, r in results.items():
+        assert isinstance(r.get("summary"), str) and r["summary"], name
+        assert isinstance(r.get("card"), str) and r["card"], name
+
+    assert results["suggest_sources"]["suggested"][0]["doi"] == "10.1/good1"
+    assert "Found 1 supporting source(s)" in results["suggest_sources"]["summary"]
+    assert results["find_sources"]["count"] == 2 and "Good one" in results["find_sources"]["card"]
+    rv = results["revise_claim"]
+    assert rv["verdict"] == "SUPPORTED" and rv["support_count"] == 1 and rv["added_refs"] == ["10.1/good1"]
+    assert "found by search" in rv["card"] and rv["verification"]["reference"] == "10.1/meh"
+    assert results["audit_paper"]["summary"] == "No open-access full text."
+    assert results["ask_papers"]["summary"] == "Couldn't answer: boom"
+
+
+def test_labels_come_from_render_constants():
+    from worth_your_read import render
+    r = _fake_verdict("c", "10.1/x", "SUPPORTED")
+    assert render.CLOSE_MATCH in r["card"]
+    assert render.VERDICT_BADGE["SUPPORTED"] in r["card"]
+    assert r["summary"].endswith(render.VERDICT_MEANING["SUPPORTED"] + ".")
+    wrong = dict(r, citation_ok=False, retracted=False)
+    assert render.WRONG_PAPER in render.render_card(wrong)
+    assert render.WRONG_PAPER_WARNING in render.summary(wrong)
+    assert render.RETRACTED in render.verdict_html(dict(r, retracted=True))
+    ask = {"question": "q", "claims": [{"claim": "x", "status": "UNGROUNDED", "sources": [],
+                                        "unsourced_numbers": ["5"]}],
+           "papers": [{"n": 1, "label": "A", "used": False, "abstract_only": True}]}
+    text = render.ask_summary(ask)
+    for label in (render.NO_QUOTE, render.UNSOURCED_NUMBERS, render.ABSTRACT_ONLY, render.NOTHING_USED):
+        assert label in text
+    s = {"grade": "F", "overall_confidence": 0.0, "n_claims": 0, "counts": {}, "worth_your_read": []}
+    assert render.NO_SOURCES in render.render_scorecard(s) and render.NO_SOURCES in render.scorecard_html(s)

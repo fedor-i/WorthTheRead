@@ -5,296 +5,393 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Worth Your Read</title>
 <style>
-  :root{
-    --bg:#f7f7f5; --panel:#fff; --ink:#1b1b1a; --muted:#6b6b66; --line:#e3e2dd;
-    --accent:#3b5bdb; --green:#2b8a3e; --amber:#b8860b; --red:#c92a2a; --grey:#868e96;
-    --greenbg:#e5f4e4; --amberbg:#f9eeda; --redbg:#fbebeb; --greybg:#f0efec;
+  /* Identical in docs/index.html and web/static/index.html (tests/test_web.py). */
+  :root {
+    --bg:#ffffff; --fg:#1a1a1a; --muted:#666; --line:#e3e3e0; --card:#faf9f7; --accent:#2f6f4f;
+    --green-bg:#e5f4e4; --green-fg:#1b5e20; --amber-bg:#f9eeda; --amber-fg:#8a5a00;
+    --red-bg:#fbebeb; --red-fg:#9b1c1c; --grey-bg:#eceae6; --grey-fg:#555;
   }
-  @media (prefers-color-scheme:dark){
-    :root{--bg:#1a1a19; --panel:#242423; --ink:#ececea; --muted:#9a9a94; --line:#373735;
-      --accent:#91a7ff; --green:#51cf66; --amber:#ffd43b; --red:#ff8787; --grey:#adb5bd;
-      --greenbg:#1c3321; --amberbg:#332d1a; --redbg:#331f1f; --greybg:#2c2c2b;}
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg:#1c1c1e; --fg:#ececec; --muted:#9a9a9a; --line:#333; --card:#262628; --accent:#5fb58a;
+      --green-bg:#17301a; --green-fg:#8fd69a; --amber-bg:#352a12; --amber-fg:#e2b451;
+      --red-bg:#361a1a; --red-fg:#f0a0a0; --grey-bg:#2c2c2e; --grey-fg:#aaa;
+    }
   }
-  *{box-sizing:border-box}
-  body{margin:0;background:var(--bg);color:var(--ink);
-    font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}
-  .wrap{max-width:860px;margin:0 auto;padding:24px 16px 80px}
-  h1{font-size:26px;margin:0 0 2px} .sub{color:var(--muted);margin:0 0 22px}
-  .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;
-    padding:18px;margin-bottom:18px}
-  .panel h2{font-size:14px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);
-    margin:0 0 12px}
-  label{display:block;font-weight:600;margin:10px 0 4px;font-size:13px}
-  input[type=text],textarea,select{width:100%;padding:9px 10px;border:1px solid var(--line);
-    border-radius:8px;background:var(--bg);color:var(--ink);font:inherit}
-  textarea{resize:vertical;min-height:46px}
-  button{font:inherit;font-weight:600;border:0;border-radius:8px;padding:9px 16px;
-    background:var(--accent);color:#fff;cursor:pointer}
-  button.ghost{background:transparent;color:var(--accent);border:1px solid var(--line)}
-  button.sm{padding:5px 10px;font-size:13px}
-  button:disabled{opacity:.5;cursor:default}
-  .row{display:flex;gap:8px;align-items:flex-start;margin-bottom:8px}
-  .row .grow{flex:1}
-  .muted{color:var(--muted)} .small{font-size:13px}
-  .slider-row{display:flex;align-items:center;gap:12px;margin-top:6px}
-  input[type=range]{flex:1}
-  .badge{display:inline-block;font-weight:700;font-size:12px;padding:3px 9px;border-radius:999px}
-  .b-SUPPORTED{background:var(--greenbg);color:var(--green)}
-  .b-OVERSTATED{background:var(--amberbg);color:var(--amber)}
-  .b-UNSUPPORTED{background:var(--redbg);color:var(--red)}
-  .b-INSUFFICIENT{background:var(--greybg);color:var(--grey)}
-  .card{border:1px solid var(--line);border-left-width:4px;border-radius:10px;
-    padding:14px;margin:10px 0;background:var(--panel)}
-  .card.v-SUPPORTED{border-left-color:var(--green)}
-  .card.v-OVERSTATED{border-left-color:var(--amber)}
-  .card.v-UNSUPPORTED{border-left-color:var(--red)}
-  .card.v-INSUFFICIENT{border-left-color:var(--grey)}
-  .card .meta{color:var(--muted);font-size:12.5px;margin:6px 0}
-  .quote{border-left:3px solid var(--line);margin:8px 0;padding:4px 0 4px 12px;
-    color:var(--ink);font-style:italic}
-  .quote .sec{font-style:normal;color:var(--muted);font-size:12px}
-  .tag{display:inline-block;background:var(--amberbg);color:var(--amber);font-size:12px;
-    padding:2px 8px;border-radius:6px;margin-top:6px}
-  .unmet{font-size:13px;color:var(--muted);margin-top:6px}
-  .wyr li{margin:6px 0}
-  .pill{font-size:11px;padding:1px 7px;border-radius:999px;background:var(--greybg);
-    color:var(--muted);margin-left:6px}
-  .status{color:var(--muted);font-size:13px;margin-left:10px}
-  .overall{font-size:18px;font-weight:700;margin:4px 0 10px}
-  a{color:var(--accent)}
-  .clarifier{margin:10px 0}
-  .plan{background:var(--greybg);border-radius:8px;padding:12px;margin-top:12px;font-size:13.5px}
-  code{background:var(--greybg);padding:1px 5px;border-radius:4px;font-size:12.5px}
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+    font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
+  .wrap { max-width:820px; margin:0 auto; padding:24px 16px 80px; }
+  h1 { font-size:1.6rem; margin:.2em 0 .1em; }
+  .sub { color:var(--muted); margin:0 0 1.4em; }
+  h2 { font-size:1rem; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); margin:1.8em 0 .6em; }
+  h2 .note { text-transform:none; letter-spacing:0; font-weight:normal; font-size:.85rem; }
+  .scorecard h2 { margin-top:14px; }
+  label { display:block; font-weight:600; margin:.6em 0 .2em; font-size:.92rem; }
+  label.opt { display:inline-block; font-weight:normal; color:var(--muted); margin:0; flex:0 0 auto; }
+  input[type=text], input[type=password], input[type=number], textarea, select {
+    width:100%; padding:9px 11px; border:1px solid var(--line); border-radius:8px;
+    background:var(--bg); color:var(--fg); font:inherit; }
+  input[type=number] { width:60px; display:inline-block; padding:4px 6px; }
+  textarea { resize:vertical; min-height:52px; }
+  .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+  .row > .grow { flex:1; min-width:200px; }
+  .hint { color:var(--muted); font-size:.82rem; margin:.3em 0 0; }
+  button { background:var(--accent); color:#fff; border:0; border-radius:8px;
+    padding:10px 16px; font:inherit; font-weight:600; cursor:pointer; }
+  button.secondary { background:transparent; color:var(--accent); border:1px solid var(--accent); }
+  button:disabled { opacity:.5; cursor:default; }
+  .claim-row { border:1px solid var(--line); border-radius:10px; padding:12px; margin:10px 0; }
+  .claim-row .x { float:right; background:none; color:var(--muted); border:0; font-size:1.1rem; padding:0 4px; }
+  .slider-row { display:flex; align-items:center; gap:12px; margin:.4em 0; }
+  .slider-row label { margin:0; }
+  input[type=range] { flex:1; }
+  a { color:var(--accent); }
+  code { background:var(--grey-bg); padding:1px 5px; border-radius:4px; font-size:.85em; }
+  .spin { color:var(--muted); font-size:.9rem; margin:.4em 0; }
+  .err { color:var(--red-fg); background:var(--red-bg); padding:8px 11px; border-radius:8px; margin:.5em 0; font-size:.9rem; }
+  .warn { color:var(--amber-fg); }
+  details.clarify, .scorecard { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px 16px; margin:12px 0; }
+  .big { font-size:1.4rem; font-weight:700; }
+
+  /* Verdict colours: each verdict / aspect status sets --v-fg/--v-bg once and
+     every element that shows it (card, badge, aspect, chip, highlight) reads them. */
+  .SUPPORTED, .ENTAILED { --v-fg:var(--green-fg); --v-bg:var(--green-bg); }
+  .OVERSTATED { --v-fg:var(--amber-fg); --v-bg:var(--amber-bg); }
+  .UNSUPPORTED, .CONTRADICTED { --v-fg:var(--red-fg); --v-bg:var(--red-bg); }
+  .INSUFFICIENT, .ABSENT { --v-fg:var(--grey-fg); --v-bg:var(--grey-bg); }
+  .card { background:var(--card); border:1px solid var(--line); border-left:5px solid var(--v-fg, var(--line));
+    border-radius:10px; padding:14px 16px; margin:12px 0; }
+  .card p { margin:.45em 0; }
+  .refs { margin-left:12px; border-left:2px solid var(--line); padding-left:12px; }
+  .badge { display:inline-block; font-weight:700; font-size:.78rem; padding:3px 9px; border-radius:20px;
+    background:var(--v-bg, var(--grey-bg)); color:var(--v-fg, var(--grey-fg)); }
+  .badge.sm { font-size:.68rem; }
+  .pill { font-size:.72rem; padding:1px 7px; border-radius:999px; background:var(--grey-bg); color:var(--grey-fg); }
+  .pill.warn { background:var(--amber-bg); color:var(--amber-fg); }
+  .meta { color:var(--muted); font-size:.82rem; margin:.4em 0; }
+  .summary { font-weight:600; margin:.5em 0; }
+  blockquote { margin:.5em 0; padding:.3em 0 .3em 12px; border-left:3px solid var(--line); font-style:italic; }
+  blockquote .sec, blockquote .close { color:var(--muted); font-style:normal; font-size:.85em; }
+  .tag { display:inline-block; background:var(--amber-bg); color:var(--amber-fg); font-size:.78rem; padding:2px 8px; border-radius:6px; }
+  .aspects { margin:.6em 0; }
+  .aspect { margin:.45em 0; padding-left:10px; border-left:3px solid var(--v-fg); }
+  .aspect blockquote { margin:.3em 0 0; font-size:.9rem; }
+  .achip { display:inline-block; font-size:.74rem; font-weight:700; text-transform:uppercase; letter-spacing:.03em;
+    padding:1px 7px; border-radius:6px; margin-right:6px; background:var(--v-bg); color:var(--v-fg); }
+  ol.wyr { padding-left:1.2em; }
+  ol.wyr li { margin:.5em 0; }
+
+  /* Self-improvement trail (docs), audit highlights (docs), tabs (docs). */
+  .revtrail { margin:.5em 0; padding:10px 12px; background:var(--bg); border:1px dashed var(--line); border-radius:8px; }
+  .revstep { margin:.3em 0; font-size:.92rem; }
+  .revstep.final { font-weight:600; }
+  .revarrow { color:var(--muted); font-size:.78rem; margin:.2em 0; }
+  .auditprose { line-height:1.75; margin:1em 0; }
+  .auditprose p { margin:.8em 0; }
+  .aclaim { border-radius:3px; padding:0 2px; border-bottom:2px solid var(--v-fg); background:var(--v-bg); cursor:help; }
+  .aclaim sup { font-size:.6rem; font-weight:700; opacity:.7; margin-left:1px; }
+  .tabs { display:flex; gap:6px; flex-wrap:wrap; margin:1.4em 0 .6em; }
+  .tab { background:transparent; color:var(--accent); border:1px solid var(--line); padding:8px 14px; }
+  .tab.active { background:var(--accent); color:#fff; border-color:var(--accent); }
+  .mode[hidden] { display:none; }
 </style>
 </head>
 <body>
 <div class="wrap">
   <h1>Worth Your Read</h1>
-  <p class="sub">Verify that claims are actually supported by the papers they cite — then keep only the sources worth reading.</p>
+  <p class="sub">Checks whether claims are actually supported by the papers they cite — grounded in each paper's real results, with every quote checked against the paper, retractions flagged and overstatements caught. Runs on this server's judge (the same engine as the MCP tools).</p>
 
-  <!-- 1. PLAN -->
-  <div class="panel">
-    <h2>1 · Plan your search <span class="muted small">(optional)</span></h2>
-    <label>Research question</label>
-    <input type="text" id="question" placeholder="e.g. How does personality affect dropout from a medical trial?">
-    <div style="margin-top:10px">
-      <button class="ghost sm" id="clarifyBtn">Clarify</button>
-      <span class="status" id="planStatus"></span>
-    </div>
-    <div id="clarifiers"></div>
-    <div id="planOut"></div>
+  <h2>1 · Plan your search <span class="note">(optional)</span></h2>
+  <label for="question">Research question</label>
+  <textarea id="question" placeholder="e.g. What psychological traits impact clinical-trial dropout?"></textarea>
+  <p class="hint"><b>Clarify &amp; plan</b> asks a few questions that shape the search, then builds a search plan and sets the confidence bar below. The question is also what <b>Ask across papers</b> answers.</p>
+  <div class="row">
+    <button class="secondary" id="clarifyBtn">Clarify &amp; plan</button>
   </div>
+  <div id="planStatus" class="spin"></div>
+  <div id="clarifyOut"></div>
 
-  <!-- 2. CLAIMS -->
-  <div class="panel">
-    <h2>2 · Claims to verify</h2>
-    <div id="claims"></div>
-    <button class="ghost sm" id="addClaim">+ Add claim</button>
+  <h2>2 · Claims to verify</h2>
+  <p class="hint">One claim per box, with the reference it cites — edit anything before verifying.</p>
+  <div id="claims"></div>
+  <button class="secondary" id="addClaim">+ Add claim</button>
 
-    <label style="margin-top:16px">Minimum confidence to keep a source</label>
-    <div class="slider-row">
-      <input type="range" id="thr" min="0" max="1" step="0.05" value="0.00">
-      <span id="thrVal" style="font-weight:700;min-width:3ch">0.00</span>
-    </div>
-    <div style="margin-top:14px">
-      <button id="verifyBtn">Verify</button>
-      <span class="status" id="verifyStatus"></span>
-    </div>
+  <h2>3 · Verify</h2>
+  <div class="slider-row">
+    <label for="minconf">Minimum confidence to keep a source</label>
+    <input type="range" id="minconf" min="0" max="1" step="0.05" value="0">
+    <span id="minconfVal">0.00</span>
   </div>
-
-  <!-- 3. ASK -->
-  <div class="panel">
-    <h2>3 · Ask across papers <span class="muted small">(slow: one model call per paper)</span></h2>
-    <p class="muted small">Answers the research question above from several papers. Every finding is quoted from a paper and the quote checked word for word.</p>
-    <label>Papers to read <span class="muted small">(DOI / PMID / URL, one per line; empty: find them)</span></label>
-    <textarea id="askRefs" placeholder="10.1038/..."></textarea>
-    <div style="margin-top:10px">
-      <button id="askBtn">Ask</button>
-      <span class="status" id="askStatus"></span>
-    </div>
-  </div>
-
-  <!-- RESULTS -->
+  <button id="verifyBtn">Verify claims</button>
+  <div id="status" class="spin"></div>
   <div id="results"></div>
+
+  <h2>4 · Ask across papers <span class="note">(slow: one model call per paper)</span></h2>
+  <p class="hint">Answers the research question above from several papers. Every finding is quoted from a paper and the quote checked word for word.</p>
+  <label for="askRefs">Papers to read <span class="note">(DOI / PMID / URL, one per line; empty: find them)</span></label>
+  <textarea id="askRefs" placeholder="10.1038/..."></textarea>
+  <p><button id="askBtn">Ask across papers</button></p>
+  <div id="askStatus" class="spin"></div>
+  <div id="askOut"></div>
 </div>
 
 <script>
-const $ = s => document.querySelector(s);
-const el = (t, c, h) => { const e=document.createElement(t); if(c)e.className=c; if(h!=null)e.innerHTML=h; return e; };
-const esc = s => (s==null?"":String(s)).replace(/[&<>"]/g, m=>({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[m]));
-const DIST = {correlation_causation:"correlation→causation",animal_to_human:"animal→human",
-  dropped_caveats:"dropped caveats",effect_size_spin:"effect-size spin",cherry_picking:"cherry-picking"};
+const $ = (id) => document.getElementById(id);
 
-async function post(url, body){
-  const r = await fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
-  if(!r.ok) throw new Error("HTTP "+r.status+": "+(await r.text()).slice(0,300));
+// ---- result cards: identical in docs/app.js and web/static/index.html ------
+// (tests/test_web.py checks the two copies match, and that the label
+// constants equal render.py's). Layout follows render.py: badge + flags,
+// summary line, "Claim." / "Source." / "Checked." / "Overstatement (…)." /
+// "Why." / "Gap.", the scorecard and the plan card.
+const esc = (s) => (s ?? "").toString().replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+const doiLink = (doi, label) => doi
+  ? `<a href="https://doi.org/${esc(doi)}" target="_blank" rel="noopener">${esc(label || doi)}</a>` : esc(label || "");
+// render.py labels, copied verbatim.
+const VERDICT_BADGE = { SUPPORTED:"✅ SUPPORTED", OVERSTATED:"🟠 OVERSTATED", UNSUPPORTED:"❌ UNSUPPORTED", INSUFFICIENT:"⚪ INSUFFICIENT" };
+const VERDICT_MEANING = { SUPPORTED:"the source supports this claim", OVERSTATED:"the claim overstates what the source shows",
+  UNSUPPORTED:"the source does not support this claim", INSUFFICIENT:"can't be verified from the available text" };
+const ASPECT_ICON = { ENTAILED:"✓", CONTRADICTED:"✗", ABSENT:"—" };
+const CLOSE_MATCH = "close match: wording differs from the paper";
+const NO_QUOTE = "no quote backs this";
+const UNSOURCED_NUMBERS = "numbers not in any quote";
+const FULL_TEXT = "full text", ABSTRACT_ONLY = "abstract only", ABSTRACT_LEVEL = "abstract-level";
+const RETRACTED = "🚩 RETRACTED", RETRACTED_WARNING = "⚠ the cited paper is RETRACTED";
+const CONCERN = "concern";
+const WRONG_PAPER = "⚠ wrong-paper?", WRONG_PAPER_WARNING = "⚠ the citation may be the wrong paper";
+const FOUND_BY_SEARCH = "🔎 found by search";
+const NOTHING_USED = "nothing used";
+const NO_SOURCES = "No sources cleared the bar.";
+const PARTLY_SUPPORTS = "only partly supports the claim";
+const CLOSE = ` <small class="close">(${CLOSE_MATCH})</small>`;
+const DISTORTION_LABELS = { none:"none", correlation_causation:"correlation→causation", animal_to_human:"animal→human",
+  dropped_caveats:"dropped caveats", effect_size_spin:"effect-size spin", cherry_picking:"cherry-picking", other:"other" };
+const REVIEW_TYPE_RE = /review|meta-analysis|meta analysis/i;
+const PREPRINT_RE = /preprint|biorxiv|medrxiv|arxiv|posted-content/i;
+const fullTextOf = (r) => r.has_fulltext ?? r.has_results ?? false;
+const wrongPaper = (r) => r.citation_ok === false && !r.verified_from_preprint;
+
+// render.summary: one line — verdict, plain meaning, the key caveat.
+function summaryLine(r) {
+  const v = r.verdict || "?";
+  let extra = "";
+  if (r.retracted) extra = ` — ${RETRACTED_WARNING}`;
+  else if (wrongPaper(r)) extra = ` — ${WRONG_PAPER_WARNING}`;
+  else if (v === "SUPPORTED" && !fullTextOf(r)) extra = ` (${ABSTRACT_LEVEL})`;
+  return `${v} · ${(r.band || "?").toLowerCase()} confidence — ${VERDICT_MEANING[v] || v}${extra}.`;
+}
+// render._linkage_line: preprint ↔ published version of record.
+function linkageLine(r) {
+  const pub = r.published_as, pre = r.has_preprint;
+  if (r.verified_from_preprint) return `↳ verified against the published version of record (you cited a preprint · ${doiLink(r.verified_from_preprint)})`;
+  if (pub && pub.journal) return `↳ this is a preprint — later published in <i>${esc(pub.journal)}</i>${pub.year ? ` ${esc(pub.year)}` : ""}${pub.doi ? ` · ${doiLink(pub.doi)}` : ""}`;
+  if (r.is_preprint) return "↳ preprint — no peer-reviewed version found yet";
+  if (pre && pre.doi) return `↳ has a preprint (${doiLink(pre.doi)})`;
+  return "";
+}
+// render.source_links: the cited paper's full text, most direct first.
+function sourceLinks(r) {
+  const res = r.resolved || {}, doi = res.doi || r.verified_reference || "", pmcid = String(res.pmcid || "");
+  const out = [];
+  if (pmcid) out.push(["Full text (PMC)", `https://www.ncbi.nlm.nih.gov/pmc/articles/${pmcid.toUpperCase().startsWith("PMC") ? pmcid : "PMC" + pmcid}/`]);
+  if (doi) out.push(["DOI", `https://doi.org/${doi}`]);
+  return out.map(([label, url]) => `<a href="${esc(url)}" target="_blank" rel="noopener">${label} ↗</a>`).join(" ");
+}
+// render._where: " — §results, p. 4"
+const where = (q) => { const b = [q.section ? `§${q.section}` : "", q.page ? `p. ${q.page}` : ""].filter(Boolean); return b.length ? " — " + b.join(", ") : ""; };
+const quoteHTML = (q) => `<blockquote>“${esc(q.quote)}”${where(q) ? `<span class="sec">${esc(where(q))}</span>` : ""}${q.close_match ? CLOSE : ""}</blockquote>`;
+
+// render.verdict_html, as a card. hideClaim: the claim is shown above (a
+// claim checked against several references).
+function verdictCardHTML(r, hideClaim = false) {
+  const v = VERDICT_BADGE[r.verdict] ? r.verdict : "INSUFFICIENT";
+  const res = r.resolved || {};
+  const flags = [fullTextOf(r) ? FULL_TEXT : ABSTRACT_ONLY];   // render._flags
+  if (r.retracted) flags.unshift(RETRACTED); else if (r.concern) flags.unshift(CONCERN);
+  if (wrongPaper(r)) flags.push(WRONG_PAPER);
+  if (r.discovered) flags.push(FOUND_BY_SEARCH);
+  const who = [(res.authors || "").split(",")[0].trim(), res.year].filter(Boolean).join(", ");
+  const trust = [
+    res.type && REVIEW_TYPE_RE.test(res.type) ? "review/meta-analysis" : res.type && PREPRINT_RE.test(res.type) ? "preprint (not peer-reviewed)" : "",
+    res.citations != null ? `${res.citations} citation${res.citations === 1 ? "" : "s"}` : "",
+    res.is_oa ? "open access" : "",
+  ].filter(Boolean).join(" · ");
+  const asps = r.aspects || [];
+  const link = linkageLine(r);
+  const h = [`<div class="card ${v}">`,
+    `<div><span class="badge ${v}">${VERDICT_BADGE[v]}</span> <span class="meta">${esc(r.band || "?")} confidence ${(r.confidence || 0).toFixed(2)} · ${flags.map(esc).join(" · ")}</span></div>`,
+    `<p class="summary">${esc(summaryLine(r))}</p>`];
+  if (!hideClaim) h.push(`<p><b>Claim.</b> ${esc(r.claim)}</p>`);
+  if (res.title) h.push(`<p class="meta"><b>Source.</b> ${esc(res.title)}${who ? ` — ${esc(who)}` : ""}${res.journal ? ` · <i>${esc(res.journal)}</i>` : ""} ${sourceLinks(r)}</p>`);
+  else if (r.resolve_error) h.push(`<p class="meta"><b>Source.</b> ${esc(r.reference)} — ${esc(r.resolve_error)}</p>`);
+  if (trust) h.push(`<p class="meta">${esc(trust)}</p>`);
+  if (link) h.push(`<p class="meta">${link}</p>`);
+  if (asps.length) {
+    h.push(`<div class="aspects"><div class="meta"><b>Checked.</b> Each part of the claim against the paper:</div>`
+      + asps.map(a => `<div class="aspect ${esc(a.status)}"><span class="achip ${esc(a.status)}">${ASPECT_ICON[a.status] || "?"} ${esc(a.type)}</span> ${esc(a.text)}${a.quote ? quoteHTML(a) : ""}</div>`).join("")
+      + `</div>`);
+  } else {
+    h.push(...(r.evidence || []).filter(e => e.quote).slice(0, 3).map(quoteHTML));   // no breakdown: the verified quotes
+  }
+  if (r.verdict === "OVERSTATED" && r.distortion_note) {
+    h.push(`<p><b>Overstatement (${esc(DISTORTION_LABELS[r.distortion_type] || r.distortion_type || "other")}).</b> ${esc(r.distortion_note)}</p>`);
+  } else if (r.rationale) {
+    h.push(`<p class="meta"><b>Why.</b> ${esc(r.rationale)}</p>`);
+  }
+  if ((r.claim_aspects_unmet || []).length) h.push(`<p class="meta"><b>Gap.</b> ${esc(r.claim_aspects_unmet.join("; "))}</p>`);
+  h.push("</div>");
+  return h.join("\n");
+}
+
+// render.render_scorecard / scorecard_html: grade, counts, threshold, then the
+// ranked "Worth your read" list.
+function scorecardHTML(s) {
+  const sup = (s.counts || {}).SUPPORTED || 0, wyr = s.worth_your_read || [];
+  const counts = Object.entries(s.counts || {}).map(([k, v]) => `${k}: ${v}`).join(" · ");
+  const list = wyr.length
+    ? `<ol class="wyr">${wyr.map(w => `<li><b>${esc(w.title)}</b>${w.doi ? ` (${doiLink(w.doi)})` : ""}`
+        + `${w.verdict ? ` <span class="pill">${esc(w.verdict)} ${(w.confidence || 0).toFixed(2)}</span>` : ""} — ${esc(w.reason)}</li>`).join("")}</ol>`
+    : `<p class="meta"><i>${NO_SOURCES}</i></p>`;
+  return `<div class="scorecard">
+    <div class="big">Overall: grade ${esc(s.grade)} (${(s.overall_confidence || 0).toFixed(2)})</div>
+    <div class="meta">${sup}/${s.n_claims} claims supported; ${wyr.length} source(s) worth reading.${counts ? ` ${esc(counts)}` : ""}</div>
+    ${s.min_confidence ? `<div class="meta">(threshold ${Number(s.min_confidence).toFixed(2)} — ${s.excluded_below_threshold || 0} screened out)</div>` : ""}
+    ${s.weak_claims ? `<div class="meta warn">⚠ ${s.weak_claims} claim(s) rest on too few sources (single-source, or no corroborating study / review).</div>` : ""}
+    <h2>Worth your read</h2>${list}</div>`;
+}
+
+// plan._plan_card, for a plan_search plan.
+function planHTML(p) {
+  const f = p.filters || {};
+  return `<div class="scorecard"><b>Search plan</b>
+    <div class="meta">Gather ~${esc(p.target_sources)} candidates, keep only confidence ≥ ${esc(p.min_confidence)}<br>
+    Study type: ${esc(f.study_type)} · Population: ${esc(f.population || "any")}${f.since_year ? ` · since ${esc(f.since_year)}` : ""}</div>
+    <div>Queries:</div><ol>${(p.queries || []).map(q => `<li><code>${esc(q)}</code></li>`).join("")}</ol></div>`;
+}
+// ---- end result cards ---------------------------------------------------------
+
+async function post(url, body) {
+  const r = await fetch(url, { method:"POST", headers:{ "Content-Type":"application/json" }, body:JSON.stringify(body) });
+  if (!r.ok) throw new Error(`HTTP ${r.status}: ${(await r.text()).slice(0, 300)}`);
   return r.json();
 }
+const showError = (id, msg) => { $(id).innerHTML = `<div class="err">${esc(msg)}</div>`; };
+const setMinConf = (v) => { $("minconf").value = v; $("minconfVal").textContent = Number(v).toFixed(2); };
+$("minconf").oninput = e => setMinConf(e.target.value);
 
-/* ---- claims editor ---- */
-function addClaimRow(claim="", ref=""){
-  const row = el("div","row");
-  row.innerHTML =
-    `<div class="grow">
-       <textarea placeholder="Claim (e.g. Higher conscientiousness lowers dropout)">${esc(claim)}</textarea>
-       <input type="text" placeholder="DOI / PMID / PMCID / URL" value="${esc(ref)}" style="margin-top:6px">
-     </div>
-     <button class="ghost sm rm" title="remove">✕</button>`;
-  row.querySelector(".rm").onclick = () => row.remove();
-  $("#claims").appendChild(row);
+// ---------- claims editor ----------
+function addClaimRow(claim = "", reference = "") {
+  const div = document.createElement("div");
+  div.className = "claim-row";
+  div.innerHTML = `<button class="x" title="remove">×</button>
+    <label>Claim</label><textarea class="c-claim" placeholder="A specific factual claim">${esc(claim)}</textarea>
+    <label>Reference (DOI / PMID / PMCID / URL)</label><input type="text" class="c-ref" placeholder="10.1234/..." value="${esc(reference)}">`;
+  div.querySelector(".x").onclick = () => div.remove();
+  $("claims").appendChild(div);
 }
-$("#addClaim").onclick = () => addClaimRow();
+$("addClaim").onclick = () => addClaimRow();
 addClaimRow();
 
-/* ---- threshold ---- */
-$("#thr").oninput = e => $("#thrVal").textContent = Number(e.target.value).toFixed(2);
-
-/* ---- plan: clarify ---- */
-$("#clarifyBtn").onclick = async () => {
-  const q = $("#question").value.trim();
-  if(!q){ $("#planStatus").textContent="enter a question first"; return; }
-  $("#planStatus").textContent="thinking…"; $("#clarifiers").innerHTML=""; $("#planOut").innerHTML="";
-  try{
-    const res = await post("/api/plan",{question:q});
-    $("#planStatus").textContent="";
-    const box = el("div");
-    (res.clarifying_questions||[]).forEach(c=>{
-      const wrap = el("div","clarifier");
-      wrap.appendChild(el("label",null,esc(c.question)));
-      if(c.free_text){
-        const i=el("input"); i.type="text"; i.placeholder="e.g. depression trials (or 'general')"; i.dataset.cid=c.id;
-        wrap.appendChild(i);
-      } else {
-        const s=el("select"); s.dataset.cid=c.id;
-        (c.options||[]).forEach(o=>{const op=el("option",null,esc(o)); op.value=o; s.appendChild(op);});
-        wrap.appendChild(s);
-      }
-      box.appendChild(wrap);
-    });
-    const btn = el("button","ghost sm",null); btn.textContent="Build search plan";
-    btn.onclick = () => buildPlan(q, box);
-    box.appendChild(btn);
-    $("#clarifiers").appendChild(box);
-  }catch(e){ $("#planStatus").textContent=e.message; }
-};
-
-async function buildPlan(q, box){
-  const answers={};
-  box.querySelectorAll("[data-cid]").forEach(x=>{ if(x.value) answers[x.dataset.cid]=x.value; });
-  $("#planStatus").textContent="optimizing…";
-  try{
-    const res = await post("/api/plan",{question:q, answers});
-    $("#planStatus").textContent="";
-    const d = el("div","plan");
-    d.innerHTML = `<b>Search plan</b><br>Gather ~${res.target_sources} candidates · keep confidence ≥ ${res.min_confidence}<br>`+
-      `Study type: ${esc(res.filters.study_type)} · Population: ${esc(res.filters.population)}`+
-      (res.filters.since_year?` · since ${res.filters.since_year}`:"")+
-      `<br><b>Queries</b><ul>`+res.queries.map(x=>`<li><code>${esc(x)}</code></li>`).join("")+`</ul>`;
-    $("#planOut").innerHTML=""; $("#planOut").appendChild(d);
-    // apply the recommended threshold to the slider
-    $("#thr").value = res.min_confidence; $("#thrVal").textContent=Number(res.min_confidence).toFixed(2);
-  }catch(e){ $("#planStatus").textContent=e.message; }
-}
-
-/* ---- verify + score ---- */
-function verdictCard(r){
-  const v = r.verdict || "INSUFFICIENT";
-  const card = el("div","card v-"+v);
-  const res = r.resolved||{};
-  let h = `<span class="badge b-${v}">${v.replace("_"," ")}</span>`+
-    ` <span class="muted small">confidence ${r.band||"?"} (${(r.confidence||0).toFixed(2)})</span>`;
-  const status=[];
-  status.push(r.citation_ok?"link ✓":"link ⚠");
-  if(r.retracted) status.push("<b style='color:var(--red)'>RETRACTED</b>");
-  else if(r.concern) status.push("concern");
-  status.push(r.has_results?"full text ✓":"abstract only ⚠");
-  h += `<div class="meta">${status.join(" · ")}</div>`;
-  h += `<div><b>Claim:</b> ${esc(r.claim)}</div>`;
-  if(res.title){
-    const cite = res.doi ? `<a href="https://doi.org/${esc(res.doi)}" target="_blank" rel="noopener">${esc(res.title)}</a>` : esc(res.title);
-    h += `<div class="meta"><b>Paper:</b> ${cite}${res.year?` (${esc(res.year)})`:""}</div>`;
-  }
-  (r.evidence||[]).slice(0,3).forEach(e=>{
-    h += `<div class="quote">“${esc(e.quote)}”${e.section?` <span class="sec">— §${esc(e.section)}</span>`:""}${e.close_match?` <span class="sec">(close match: wording differs from the paper)</span>`:""}</div>`;
-  });
-  if(v==="OVERSTATED" && r.distortion_note){
-    h += `<div><span class="tag">${esc(DIST[r.distortion_type]||r.distortion_type||"overstated")}</span> <span class="small">${esc(r.distortion_note)}</span></div>`;
-  }
-  if((r.claim_aspects_unmet||[]).length)
-    h += `<div class="unmet"><b>Not established:</b> ${esc(r.claim_aspects_unmet.join("; "))}</div>`;
-  if(r.downgraded)
-    h += `<div class="unmet"><i>Downgraded to insufficient: no quote could be verified against the source.</i></div>`;
-  card.innerHTML = h;
-  return card;
-}
-
-$("#verifyBtn").onclick = async () => {
-  const claims=[];
-  document.querySelectorAll("#claims .row").forEach(row=>{
-    const claim=row.querySelector("textarea").value.trim();
-    const ref=row.querySelector("input").value.trim();
-    if(claim && ref) claims.push({claim, reference:ref});
-  });
-  if(!claims.length){ $("#verifyStatus").textContent="add at least one claim + reference"; return; }
-  $("#verifyBtn").disabled=true; $("#verifyStatus").textContent=`verifying ${claims.length} claim(s)…`;
-  $("#results").innerHTML="";
-  try{
-    const s = await post("/api/score",{claims, min_confidence:Number($("#thr").value)});
-    $("#verifyStatus").textContent="";
-    const out = el("div","panel");
-    out.appendChild(el("div","overall",
-      `Overall confidence: ${s.overall_confidence.toFixed(2)} (grade ${s.grade}) · ${s.n_claims} claim(s)`));
-    const counts = Object.entries(s.counts||{}).map(([k,v])=>`${k}: ${v}`).join(" · ");
-    if(counts) out.appendChild(el("div","muted small",esc(counts)+
-      (s.min_confidence?` · threshold ${s.min_confidence} (${s.excluded_below_threshold} screened out)`:"")));
-    (s.claims||[]).forEach(r=>out.appendChild(verdictCard(r)));
-    // worth your read
-    const wyr = el("div"); wyr.appendChild(el("h2",null,"Worth your read"));
-    if((s.worth_your_read||[]).length){
-      const ol=el("ol","wyr");
-      s.worth_your_read.forEach(w=>{
-        const li=el("li");
-        const title = w.doi?`<a href="https://doi.org/${esc(w.doi)}" target="_blank" rel="noopener">${esc(w.title)}</a>`:esc(w.title);
-        li.innerHTML = `<b>${title}</b> <span class="pill">${w.verdict} ${(w.confidence||0).toFixed(2)}</span><br><span class="small muted">${esc(w.reason)}</span>`;
-        ol.appendChild(li);
-      });
-      wyr.appendChild(ol);
-    } else wyr.appendChild(el("p","muted","No sources cleared the bar."));
-    out.appendChild(wyr);
-    $("#results").appendChild(out);
-  }catch(e){ $("#verifyStatus").textContent=e.message; }
-  finally{ $("#verifyBtn").disabled=false; }
-};
-
-$("#askBtn").onclick = async () => {
-  const question=$("#question").value.trim();
-  if(!question){ $("#askStatus").textContent="write a research question in step 1"; return; }
-  const references=$("#askRefs").value.split(/\n+/).map(x=>x.trim()).filter(Boolean);
-  $("#askBtn").disabled=true; $("#askStatus").textContent="reading papers… (minutes)";
-  $("#results").innerHTML="";
-  try{
-    const r = await post("/api/ask",{question, references});
-    $("#askStatus").textContent="";
-    const out = el("div","panel");
-    const refs = c => [...new Set((c.sources||[]).map(s=>s.paper))].sort((a,b)=>a-b).map(n=>`[${n}]`).join("");
-    if((r.overview||[]).length) out.appendChild(el("div","overall",r.overview.map(c=>esc(c.claim)+" "+refs(c)).join(" ")));
-    (r.claims||[]).forEach(c=>{
-      const card=el("div","card");
-      let h=`<div>${esc(c.claim)} <span class="pill">${refs(c)||"no quote"}</span></div>`;
-      if((c.against||[]).length) h+=`<div class="small muted">Disputed by ${[...new Set(c.against.map(s=>s.paper))].map(n=>`[${n}]`).join("")}</div>`;
-      if((c.unsourced_numbers||[]).length) h+=`<div class="small muted">Numbers not in any quote: ${esc(c.unsourced_numbers.join(", "))}</div>`;
-      (c.sources||[]).slice(0,3).forEach(s=>{ h+=`<div class="quote">“${esc(s.quote)}” <span class="sec">— [${s.paper}]</span></div>`; });
-      card.innerHTML=h; out.appendChild(card);
-    });
-    if((r.papers||[]).length){
-      const ol=el("ol","wyr");
-      r.papers.forEach(p=>ol.appendChild(el("li",null,esc(p.label)+(p.abstract_only?' <span class="pill">abstract only</span>':"")+(p.used?"":' <span class="pill">nothing used</span>'))));
-      out.appendChild(el("h2",null,"Papers read")); out.appendChild(ol);
+// ---------- 1 · plan (plan_search: clarify, then plan) ----------
+$("clarifyBtn").onclick = async () => {
+  const question = $("question").value.trim();
+  $("clarifyOut").innerHTML = "";
+  if (!question) return showError("clarifyOut", "Type a question first.");
+  $("planStatus").textContent = "Thinking…";
+  try {
+    const res = await post("/api/plan", { question });
+    let html = `<details class="clarify" open><summary><b>Before I search</b> — key terms: ${esc((res.key_terms || []).join(", "))}</summary>`;
+    for (const c of res.clarifying_questions || []) {
+      html += `<label>${esc(c.question)}</label>`;
+      html += c.free_text
+        ? `<input type="text" data-cid="${esc(c.id)}" placeholder="general">`
+        : `<select data-cid="${esc(c.id)}">${(c.options || []).map(o => `<option>${esc(o)}</option>`).join("")}</select>`;
     }
-    if(r.error) out.appendChild(el("p","muted",esc(r.error)));
-    $("#results").appendChild(out);
-  }catch(e){ $("#askStatus").textContent=e.message; }
-  finally{ $("#askBtn").disabled=false; }
+    html += `<p><button class="secondary" id="planBtn">Build search plan</button></p><div id="planOut"></div></details>`;
+    $("clarifyOut").innerHTML = html;
+    $("planBtn").onclick = () => buildPlan(question);
+  } catch (e) { showError("clarifyOut", e.message); }
+  $("planStatus").textContent = "";
+};
+async function buildPlan(question) {
+  const answers = {};
+  $("clarifyOut").querySelectorAll("[data-cid]").forEach(x => { if (x.value) answers[x.dataset.cid] = x.value; });
+  $("planStatus").textContent = "Building the plan…";
+  try {
+    const p = await post("/api/plan", { question, answers });
+    setMinConf(p.min_confidence);
+    $("planOut").innerHTML = planHTML(p);
+  } catch (e) { showError("planOut", e.message); }
+  $("planStatus").textContent = "";
+}
+
+// ---------- 3 · verify one claim at a time (cards appear as they finish), then score ----------
+$("verifyBtn").onclick = async () => {
+  const claims = [...$("claims").querySelectorAll(".claim-row")]
+    .map(d => ({ claim: d.querySelector(".c-claim").value.trim(), reference: d.querySelector(".c-ref").value.trim() }))
+    .filter(c => c.claim && c.reference);
+  $("results").innerHTML = "";
+  if (!claims.length) return showError("results", "Add at least one claim with a reference.");
+  $("verifyBtn").disabled = true;
+  const results = [];
+  try {
+    for (let i = 0; i < claims.length; i++) {
+      $("status").textContent = `Claim ${i + 1} / ${claims.length} — verifying…`;
+      results.push(await post("/api/verify", claims[i]));
+      $("results").innerHTML = results.map(r => verdictCardHTML(r)).join("");
+    }
+    const s = await post("/api/score", { results, min_confidence: Number($("minconf").value) });
+    $("results").innerHTML = scorecardHTML(s) + results.map(r => verdictCardHTML(r)).join("");
+  } catch (e) {
+    $("results").insertAdjacentHTML("beforeend", `<div class="err">Verify failed: ${esc(e.message)}</div>`);
+  } finally {
+    $("status").textContent = ""; $("verifyBtn").disabled = false;
+  }
+};
+
+// ---------- 4 · ask across papers (render.ask_summary / ask_card, laid out like the Zotero panel) ----------
+function askHTML(r) {
+  if (r.error) return `<div class="err">${esc(r.summary || "Couldn't answer: " + r.error)}</div>`;
+  const papers = new Map((r.papers || []).map(p => [p.n, p]));
+  const refs = (c) => [...new Set((c.sources || []).map(s => s.paper))].sort((a, b) => a - b).map(n => `[${n}]`).join("");
+  const flags = (c) => (c.status !== "GROUNDED" ? ` <span class="pill">${NO_QUOTE}</span>` : "")
+    + ((c.unsourced_numbers || []).length ? ` <span class="pill warn">${UNSOURCED_NUMBERS}: ${esc(c.unsourced_numbers.join(", "))}</span>` : "");
+  const quote = (s) => `<blockquote>“${esc(s.quote)}”<span class="sec"> — [${s.paper}] ${esc((papers.get(s.paper) || {}).label || "")}${s.page ? `, p. ${esc(s.page)}` : ""}${s.part ? `; backs “${esc(s.part)}”` : ""}</span></blockquote>`;
+  const claim = (c) => {
+    const against = [...new Set((c.against || []).map(s => s.paper))].sort((a, b) => a - b);
+    return `<div class="card">${esc(c.claim)} ${refs(c)}${flags(c)}`
+      + (against.length ? `<div class="meta warn">— disputed by ${against.map(n => `[${n}]`).join(", ")}</div>` : "")
+      + (c.problems || []).map(p => `<div class="meta warn">Check this: ${p.words ? `“${esc(p.words)}” — ` : ""}${esc(p.why)}</div>`).join("")
+      + (c.sources || []).slice(0, 2).map(quote).join("") + `</div>`;
+  };
+  const claims = r.claims || [], main = claims.filter(c => !c.extra), extra = claims.filter(c => c.extra);
+  const used = (r.papers || []).filter(p => p.used).length;
+  const h = [`<div class="scorecard"><div class="big">${esc(r.question || "")}</div>`
+    + `<div class="meta">${claims.filter(c => c.status === "GROUNDED").length} grounded claim(s), ${claims.filter(c => c.status !== "GROUNDED").length} not verified · ${used} of ${(r.papers || []).length} papers cited</div>`
+    + (r.truncated ? `<div class="meta warn">The model's answer was cut off; showing the claims that came through complete.</div>` : "")
+    + ((r.overview || []).length ? `<h2>Short answer</h2><p>${r.overview.map(c => `${esc(c.claim)} ${refs(c)}${flags(c)}`).join(" ")}</p>` : "")
+    + `</div>`];
+  if (main.length) h.push(`<h2>Evidence</h2>` + main.map(claim).join(""));
+  if (extra.length) h.push(`<h2>Further findings from individual papers</h2>` + extra.map(claim).join(""));
+  if (!claims.length) h.push(`<p class="meta">No usable answer came back from the model. Try rephrasing the question, or fewer papers.</p>`);
+  if ((r.not_addressed || []).length) h.push(`<p><b>Not addressed by these papers:</b> ${esc(r.not_addressed.join("; "))}</p>`);
+  if ((r.papers || []).length) h.push(`<h2>Papers read</h2><ol class="wyr">` + r.papers.map(p => `<li>${esc(p.label)}`
+    + (p.abstract_only ? ` <span class="pill">${ABSTRACT_ONLY}</span>` : "") + (p.used ? "" : ` <span class="pill">${NOTHING_USED}</span>`) + `</li>`).join("") + `</ol>`);
+  if ((r.skipped || []).length) h.push(`<p class="meta">Not read: ${r.skipped.length} paper(s) — ${esc(r.skipped.join("; "))}</p>`);
+  return h.join("\n");
+}
+$("askBtn").onclick = async () => {
+  const question = $("question").value.trim();
+  $("askOut").innerHTML = "";
+  if (!question) return showError("askOut", "Write a research question in step 1 first.");
+  const references = $("askRefs").value.split(/\n+/).map(x => x.trim()).filter(Boolean);
+  $("askBtn").disabled = true;
+  const t0 = Date.now();
+  const tick = () => { $("askStatus").textContent = `Reading papers… ${Math.round((Date.now() - t0) / 1000)} s (this takes minutes)`; };
+  tick(); const timer = setInterval(tick, 1000);
+  try { $("askOut").innerHTML = askHTML(await post("/api/ask", { question, references })); }
+  catch (e) { showError("askOut", e.message); }
+  finally { clearInterval(timer); $("askStatus").textContent = ""; $("askBtn").disabled = false; }
 };
 </script>
 </body>

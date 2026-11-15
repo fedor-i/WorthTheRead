@@ -15,8 +15,11 @@ with a local Ollama model; the plugin only talks to `127.0.0.1`.
   rests on and their page. Claims whose passage isn't found in the paper are
   marked, not hidden.
 - **Verify claim** → SUPPORTED / OVERSTATED / UNSUPPORTED / INSUFFICIENT, with the
-  quote and page behind each part of the claim. An overstated claim gets a
-  **Reword to match the evidence** button.
+  quote and page behind each part of the claim, then why (for an overstated
+  claim, what kind of overstatement) and what the paper doesn't establish — the
+  same verdict card the MCP tool and the website show. A quote that matched
+  the paper only loosely is marked *(close match: wording differs from the
+  paper)*. An overstated claim gets a **Reword to match the evidence** button.
 - **Summarize → note** saves a grounded summary as a child note.
 - Select text in a PDF → **Verify with Worth Your Read** in the selection popup.
 - Click any `p. N` link to open the PDF at that page.
@@ -44,7 +47,11 @@ disagreement between papers visible. Each answer claim names the papers it
 rests on with their verbatim passages; the merge can only point at checked
 findings, never write quotes, and any finding it leaves out is still listed.
 With many papers the findings are merged in parts of at most 24, then the
-parts merged, so no single model call has to juggle them all.
+parts merged, so no single model call has to juggle them all. With a small
+model (`gemma4:e4b`) the findings are instead grouped by meaning and the groups
+ranked, and the model only writes one claim per group; this needs the
+`nomic-embed-text` embedding model in Ollama (see Install) and falls back to the
+merge without it.
 Then each answer claim that rests on several findings is checked against them
 in one short call. A finding stays if it backs the whole claim or one part of
 it (same region, population, outcome), and its citation is placed right after
@@ -119,6 +126,9 @@ For a sentence that isn't supported you can:
    `extensions.wyr.sidecarCommand` at that venv's `bin/wyr-sidecar`).
 2. In Zotero: *Tools → Plugins → ⚙ → Install Plugin From File…* and choose
    `build/worth-your-read-0.1.0.xpi`.
+3. Install [Ollama](https://ollama.com) and the model: `ollama pull gemma4:26b`.
+   With less memory use `gemma4:e4b` instead (set `extensions.wyr.model`) and
+   also run `ollama pull nomic-embed-text`.
 
 You don't start the sidecar yourself: the first time the plugin needs it, it
 launches `wyr-sidecar` (found in `~/.local/bin`, `/opt/homebrew/bin` or

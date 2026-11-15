@@ -20,7 +20,7 @@ Runs the configured model (set WYR_USE_OLLAMA=1 for the local one).
     SOURCE: a collection name, "keys:KEY1,KEY2" (Zotero item keys), or
     "research:N" (snowball the question with research.py, read the N most
     relevant papers online; ZOTERO_SQLITE_COPY is then unused)
-    (METHODS=merge,grouped to run only some; findings are reused from OUT)
+    (METHODS=merge,ranked to run only some; findings are reused from OUT)
 """
 import json
 import os

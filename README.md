@@ -30,10 +30,10 @@ Install the local sidecar and the plugin, then right-click a collection and
 choose *Ask across this collection*. Steps: [zotero-plugin/README.md](zotero-plugin/README.md#install).
 It needs [Ollama](https://ollama.com) with `gemma4:26b`. On a machine with
 less memory, `gemma4:e4b` finds about as much in the papers
-([results](benchmark/reviews/RESULTS.md)). With a small gemma the findings are
-grouped by meaning and ranked instead of merged by the model, which needs
-`ollama pull nomic-embed-text` (without it, it merges as before);
-`WYR_COMBINE=merge` or `ranked` picks either way for any model.
+([results](benchmark/reviews/RESULTS.md)): set the plugin's
+`extensions.wyr.model` to it and also run `ollama pull nomic-embed-text`. With
+a small gemma the findings are grouped by meaning and ranked rather than merged
+by the model, and that needs the embedding model (without it they are merged).
 
 ## Use it from an AI assistant (MCP)
 
@@ -101,8 +101,9 @@ and drop `WYR_USE_BEDROCK`.
   clarifying questions, then (with answers) an optimized search plan.
 - **`ask_papers(question, references=None, max_papers=6, depth="standard")`** —
   answer a question from several papers (the Zotero *Ask across* engine): every
-  finding is quoted and the quote checked word for word, then merged into
-  claims with the papers behind and against each, plus a short answer.
+  finding is quoted and the quote checked word for word, then combined into
+  claims (`WYR_COMBINE`, below) with the papers behind and against each, plus a
+  short answer.
   No references: `find_sources` picks them. Slow (a model call per paper), so
   it runs on the server's backend (API key, Bedrock or Ollama), not sampling.
 
@@ -130,12 +131,14 @@ cp .env.example .env                            # add your ANTHROPIC_API_KEY
 
 ## Auth backends
 
-The judge reaches Claude one of two ways:
+The judge runs one of three ways:
 
-1. **Anthropic API key** (default) — set `ANTHROPIC_API_KEY`.
+1. **Anthropic API key** (default) — set `ANTHROPIC_API_KEY`. `WYR_MODEL`
+   picks the model (default `claude-sonnet-5-5`).
 2. **AWS Bedrock** — set `WYR_USE_BEDROCK=1` (Claude Code's `CLAUDE_CODE_USE_BEDROCK=1`
    is honored too). Uses the standard AWS credential chain; set `WYR_AWS_PROFILE`
-   to choose a profile and `AWS_REGION` for the region. You must also set
+   to choose a profile and `AWS_REGION` (or `AWS_DEFAULT_REGION`; default
+   `us-east-1`) for the region. You must also set
    `WYR_BEDROCK_MODEL` to an inference-profile id your account can invoke:
 
    ```bash
@@ -149,16 +152,36 @@ The judge reaches Claude one of two ways:
    The Bedrock IAM principal needs `bedrock:InvokeModel`, and calls bill your
    AWS account.
 3. **Local Ollama** — set `WYR_USE_OLLAMA=1` and `WYR_OLLAMA_MODEL`
-   (e.g. `gemma4:26b`). Nothing leaves the machine except the paper lookups
-   themselves. The local judge reads the abstract plus the claim's best-matching
-   passages (`WYR_OLLAMA_FOCUS_CHARS`, default 12000; `0` reads everything);
-   quotes are still verified against the full text. Rewriting claims
-   (`revise_claim`) also runs locally. Thinking is off by default, except that
-   a small gemma (`e2b`/`e4b`) thinks on `_merge,_overview,_unfaithful`;
-   `WYR_OLLAMA_THINK=0` turns it off, `WYR_OLLAMA_THINK=1` turns it on for every call, or a comma list of steps
-   (the function that calls the model, e.g. `_merge,_overview,_unfaithful`)
-   turns it on only there. `WYR_CALL_LOG=calls.jsonl` logs each local model call:
-   step, seconds, tokens, reply and thinking.
+   (default `gemma4:e4b`; e.g. `gemma4:26b`) at `WYR_OLLAMA_URL` (default
+   `http://localhost:11434`). Nothing leaves the machine except the paper
+   lookups themselves. The local judge reads the abstract plus the claim's
+   best-matching passages (`WYR_OLLAMA_FOCUS_CHARS`, default 12000; `0` reads
+   everything); quotes are still verified against the full text. Asking a
+   question reads up to `WYR_OLLAMA_READ_CHARS` (default 18000) of each paper.
+   Rewriting claims (`revise_claim`) also runs locally.
+   - **Combining findings** across papers: `WYR_COMBINE=merge` lets the model
+     merge them; `ranked` groups them by meaning with an Ollama embedding model
+     (`WYR_EMBED_MODEL`, default `nomic-embed-text`: `ollama pull
+     nomic-embed-text`) and ranks the groups, falling back to the merge without
+     it. Default: `ranked` for a small gemma (`e2b`/`e4b`), `merge` otherwise.
+   - **Thinking** is off by default, except that a small gemma thinks on
+     `_merge,_overview,_unfaithful`. `WYR_OLLAMA_THINK=0` turns it off, `1` on
+     for every call, or a comma list of steps (the function that calls the
+     model) turns it on only there; each thinking call gets
+     `WYR_OLLAMA_THINK_TOKENS` (default 4000) extra tokens.
+   - `WYR_OLLAMA_NUM_CTX` (20000), `WYR_OLLAMA_NUM_PREDICT` (1500) and
+     `WYR_OLLAMA_TIMEOUT` (600 s) set each call's context, reply length and
+     timeout;
+     `WYR_CALL_LOG=calls.jsonl` logs each local model call: step, seconds,
+     tokens, reply and thinking.
+
+Other optional settings: free API keys `WYR_S2_API_KEY` (Semantic Scholar;
+`S2_API_KEY` works too), `WYR_CORE_API_KEY` (CORE repository full text),
+`WYR_SPRINGER_API_KEY`, `WYR_ELSEVIER_API_KEY` and `WYR_ELSEVIER_INSTTOKEN`
+(publisher OA full text), and `WYR_OPENALEX_API_KEY` and `WYR_CONTACT_EMAIL`
+(see the sidecar section); `WYR_HTTP_TIMEOUT` (20 s per request),
+`WYR_MAX_TEXT_CHARS` (48000, the most full text kept per paper) and
+`WYR_ZOTERO_DIR` (`~/Zotero`, where the sidecar finds attachments).
 
 ## Live website (GitHub Pages)
 
