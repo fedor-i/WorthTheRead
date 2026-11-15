@@ -12,6 +12,9 @@ report, so that prompt changes aren't fitted to the scores.
     python benchmark/reviews/run.py extract [ID ...]   key statements (Bedrock)
     python benchmark/reviews/run.py answer [ID ...]    our answer (local model)
     python benchmark/reviews/run.py score [ID ...]     coverage (Bedrock)
+    python benchmark/reviews/run.py answer --remerge ID   only the steps after reading the
+        papers, from the findings the last `answer` saved in answers/found (fast loop for merge prompts;
+        then score --remerge, table --remerge)
     python benchmark/reviews/run.py table [--test]     no model
     python benchmark/reviews/run.py export [ID ...]    the papers we read, for other tools
     python benchmark/reviews/run.py rival TOOL [ID ...]   score another tool's answer (Bedrock)
@@ -42,6 +45,8 @@ LOAD_PAPERS = 80       # cited papers fetched, the ones closest to the question
 READ_PAPERS = 40       # as in the OCP run; ask_many ranks them by their full text
 DEPTH = "standard"     # --deep: answer.DEPTHS["deep"], kept apart in answers/deep and scored/deep
 ANSWERS, SCORED = "answers", "scored"
+METHOD = None          # --method=merge|ranked: answer.COMBINE[METHOD]; None is config.COMBINE
+REMERGE = False        # --remerge: reuse answers/found/ID.json, kept apart in answers/remerge and scored/remerge
 KEY_STATEMENTS = 12
 PASSAGES = 8           # per statement, for "is it in the papers read at all"
 LEVELS = ("reachable", "findings", "evidence", "short")
@@ -145,9 +150,23 @@ def run_answer(r: dict) -> None:
         got, pages, _ = sidecar._load(sidecar.Paper(title=title, reference=doi))
         followed.append({"label": title or doi, "key": doi, "fetched": got, "pages": pages})
         return followed[-1]
+    if REMERGE:
+        # Replay: the papers' findings as saved, so only the steps after them run.
+        got = _read("answers", "found", f"{r['id']}.json")
+        answer._map = lambda *a, **k: (got["found"], got["gaps"], got["papers"])
+        answer._draft = lambda *a, **k: None
+        answer._unfaithful = lambda *a, **k: []   # only flags wording; no scored text changes
+    else:
+        read = answer._map
+        def keep(*a, **k):
+            res = read(*a, **k)
+            _write({"model": answer.config.OLLAMA_MODEL, "found": res[0], "gaps": res[1], "papers": res[2]},
+                   "answers", "found", f"{r['id']}.json")
+            return res
+        answer._map = keep
     t = time.time()
     out = answer.ask_many(r["question"], papers, progress=lambda p: print(p.get("stage"), end=" ", flush=True),
-                          max_papers=READ_PAPERS, follow=follow, depth=DEPTH)
+                          max_papers=READ_PAPERS, follow=follow, depth=DEPTH, method=METHOD)
     out["seconds"] = round(time.time() - t)
     out["read"] = [p["key"] for p in out["papers"]]
     if DEPTH == "deep":
@@ -271,6 +290,13 @@ if __name__ == "__main__":
     step, ids = sys.argv[1], [a for a in sys.argv[2:] if not a.startswith("--")]
     if "--deep" in sys.argv:
         DEPTH, ANSWERS, SCORED = "deep", os.path.join("answers", "deep"), os.path.join("scored", "deep")
+    if "--remerge" in sys.argv:
+        REMERGE, ANSWERS, SCORED = True, os.path.join("answers", "remerge"), os.path.join("scored", "remerge")
+    for a in sys.argv:
+        if a.startswith("--batch="):        # try another answer.MERGE_BATCH
+            answer.MERGE_BATCH = int(a.split("=")[1])
+        if a.startswith("--method="):       # another answer.COMBINE, e.g. ranked
+            METHOD = a.split("=")[1]
     if step == "rival":
         for row in reviews(ids[1:]):
             rows = [s for s in rival(ids[0], row) if s["reachable"] in ("yes", "partly")]

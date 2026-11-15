@@ -29,9 +29,11 @@ with quotes checked against the source text.
 Install the local sidecar and the plugin, then right-click a collection and
 choose *Ask across this collection*. Steps: [zotero-plugin/README.md](zotero-plugin/README.md#install).
 It needs [Ollama](https://ollama.com) with `gemma4:26b`. On a machine with
-less memory, `gemma4:e4b` (it thinks on the merge, short answer and wording
-check by default) did about as well on the review benchmark and ran faster
-([results](benchmark/reviews/RESULTS.md)).
+less memory, `gemma4:e4b` finds about as much in the papers
+([results](benchmark/reviews/RESULTS.md)). With a small gemma the findings are
+grouped by meaning and ranked instead of merged by the model, which needs
+`ollama pull nomic-embed-text` (without it, it merges as before);
+`WYR_COMBINE=merge` or `ranked` picks either way for any model.
 
 ## Use it from an AI assistant (MCP)
 

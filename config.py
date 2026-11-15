@@ -37,6 +37,12 @@ BEDROCK_MODEL = os.environ.get("WYR_BEDROCK_MODEL", "").strip()
 USE_OLLAMA = _truthy(os.environ.get("WYR_USE_OLLAMA", ""))
 OLLAMA_URL = os.environ.get("WYR_OLLAMA_URL", "http://localhost:11434").rstrip("/")
 OLLAMA_MODEL = os.environ.get("WYR_OLLAMA_MODEL", "gemma4:e4b")
+# How ask_many combines findings: "merge" lets the model choose what stays;
+# "ranked" groups them by embedding (EMBED_MODEL, pulled into Ollama) and ranks
+# the groups, so a small model only writes. Unset: ranked for a small gemma on
+# Ollama, whose merge drops findings to keep to 10 claims (RESULTS.md), merge
+# otherwise (WYR_COMBINE, set below SMALL_MODEL).
+EMBED_MODEL = os.environ.get("WYR_EMBED_MODEL", "nomic-embed-text")
 OLLAMA_NUM_CTX = int(os.environ.get("WYR_OLLAMA_NUM_CTX", "20000"))
 OLLAMA_NUM_PREDICT = int(os.environ.get("WYR_OLLAMA_NUM_PREDICT", "1500"))
 OLLAMA_TIMEOUT = float(os.environ.get("WYR_OLLAMA_TIMEOUT", "600"))
@@ -48,7 +54,9 @@ OLLAMA_TIMEOUT = float(os.environ.get("WYR_OLLAMA_TIMEOUT", "600"))
 # it, its merge is vague, its short answer can come back empty and its wording
 # check flags nitpicks (benchmark/reviews/RESULTS.md). Larger models don't.
 SMALL_MODEL_THINK = "_merge,_overview,_unfaithful"
-_think = os.environ.get("WYR_OLLAMA_THINK", SMALL_MODEL_THINK if re.search(r":e\d+b", OLLAMA_MODEL) else "").strip()
+SMALL_MODEL = bool(re.search(r":e\d+b", OLLAMA_MODEL))
+COMBINE = os.environ.get("WYR_COMBINE", "ranked" if USE_OLLAMA and SMALL_MODEL else "merge")
+_think = os.environ.get("WYR_OLLAMA_THINK", SMALL_MODEL_THINK if SMALL_MODEL else "").strip()
 OLLAMA_THINK = _think.lower() in ("1", "true", "yes", "on")
 OLLAMA_THINK_STEPS = set() if OLLAMA_THINK or _think.lower() in ("", "0", "false", "no", "off") else {x.strip() for x in _think.split(",") if x.strip()}
 OLLAMA_THINK_TOKENS = int(os.environ.get("WYR_OLLAMA_THINK_TOKENS", "4000"))

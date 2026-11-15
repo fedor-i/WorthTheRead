@@ -105,6 +105,8 @@ is the committed 26b answer from an older version of the pipeline:
 | 26b, earlier | 4093 s | 14 | 6 | 1 | 13 |
 | 26b | 3928 s | 11 | 9 | 4 | 11 |
 | e4b | 4297 s | 11 | 4 | 0 | 11 |
+| e4b, merge keeps names | 3927 s | 10 | 4 | 2 | 12 |
+| e4b, ranked (2026-11-14) | 1819 s | 7 | 4 | 2 | 8 |
 
 - 26b: the merged claims and short answer now carry more of the review
   (evidence 6 to 9, short answer 1 to 4); findings fell 14 to 11, mostly on
@@ -114,4 +116,43 @@ is the committed 26b answer from an older version of the pipeline:
   step seen on ferroptosis, now beyond the judge's noise.
 - e4b was not faster here: thinking on the merge was half its time. Its gain is
   memory, not speed.
+- Asking the merge to keep named molecules, genes, sites and methods
+  (2026-11-13) did not lift e4b's evidence (4 again); short answer 0 to 2 is
+  within run noise. The merge's loss is not just vague wording.
 
+## Update: a faster loop for the merge (2026-11-14)
+
+`answer` now saves the papers' findings (answers/found), and `answer --remerge`
+replays only the steps after them, without the wording check (it flags, it
+changes no scored text). On ferroptosis (tune), e4b, 11 key statements in the
+papers read, same findings throughout:
+
+| Run | Time | Findings | Evidence | Short answer | Short, yes or partly |
+|---|---|---|---|---|---|
+| full run | 1482 s | 6 | 4 | 3 | 5 |
+| replay | 1168 s | 8 | 5 | 5 | 7 |
+| replay, no wording check | 879 s | 5 | 4 | 2 | 4 |
+| replay, merge batch 12 | 4349 s | 7 | 5 | 4 | 7 |
+| replay, merge batch 12 | 4293 s | 6 | 4 | 3 | 7 |
+| replay, ranked (below) | 78 s | 6 | 4 | 2 | 6 |
+
+- Same findings, same prompt: evidence moves by 1 and the short answer by up
+  to 3 between runs, so one replay only shows a change of 2 or more.
+- Merge batch 12 (against 24) is no better on evidence and five times slower
+  (more merge rounds, each thinking). MERGE_BATCH stays 24.
+- e4b is deterministic at temperature 0: the two batch-12 replays wrote the
+  same text word for word and still scored evidence 5 and 4. Much of the
+  spread is the Opus judge, not the model.
+- Ranked (`ask_many(method="ranked")`): no model chooses what stays. Findings
+  are grouped by meaning (nomic-embed-text, cosine 0.85), groups ranked by
+  papers backing them (log) and closeness to the question, less a penalty for
+  repeating a group already picked; e4b writes one sentence per top-10 group,
+  shown at most 5 of its findings (a whole group of 26 made it write one
+  run-on sentence that broke the JSON). Same coverage as the merge (evidence
+  4), in 78 s against 879 s: the merge was the thinking step.
+- On the sealed test reviews (table above), e4b ranked kept the merge's
+  evidence (4) and short answer (2) in half the time (1819 s against 3927 s);
+  findings (7 against 10) and short, yes or partly (8 against 12) came out
+  lower. Findings don't depend on how they are combined (every finding is
+  still listed), so that gap is most likely judge noise on a long list, not
+  lost facts; ranked looks a wash on coverage, is faster, and drops nothing silently. Kept apart in answers/ranked.

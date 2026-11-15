@@ -9,6 +9,8 @@ into a claim it doesn't support (overstatement).
 """
 import html
 import json
+import math
+import time
 import re
 
 from . import config
@@ -162,7 +164,10 @@ the question. When claims from different papers agree, merge them into one \
 answer claim that lists all their ids. When papers disagree or differ \
 (population, method, estimate, conclusion), keep that visible: a separate \
 answer claim per side, or one that states the disagreement and lists both \
-sides' ids. Keep numbers and caveats as the claims state them. Every answer \
+sides' ids. Keep numbers and caveats as the claims state them, and keep the \
+specifics: name the molecules, genes, residues, sites, organisms and methods \
+the claims name; never replace them with general words like "certain \
+proteins" or "some regions". Every answer \
 claim must list the ids it rests on, and must not say more than those claims \
 say. If part of the question is answered by no claim, say so in "not_addressed".
 
@@ -261,6 +266,7 @@ def _merge(question: str, chosen: list, found: list, items: list) -> tuple:
         # The model echoes "[P1, P3]"; the citations come from the ids.
         merged.append((_strip_ids(c["claim"]), _refs(c.get("from"), items, found)))
     return merged, data
+
 
 
 _SUPPORT_SYSTEM = """You check which FINDINGS back a SENTENCE. A finding backs \
@@ -793,9 +799,112 @@ def _combine_grouped_parts(question: str, chosen: list, found: list, report) -> 
     return checked, not_addressed, truncated
 
 
+# --- group by meaning, rank, then write ------------------------------------------
+# The merge asks one call to choose, group and rewrite under "at most 10", so a
+# small model that obeys drops findings silently (e4b: 236 findings, 9 claims,
+# NCOA4 ferritinophagy gone), while 26b ignores the cap (44 claims). Here no
+# model chooses: findings that say the same thing are grouped by embedding, the
+# groups ranked by how many papers back them and how close they are to the
+# question, with a penalty for repeating a group already picked, and the model
+# only writes one sentence per top group. Findings past the top stay listed.
+RANK_TOP = 10        # sentences written, as the merge's "at most 10"
+RANK_SAME = 0.85     # cosine at which two findings are the same point
+RANK_REPEAT = 0.3    # weight of the penalty for being like a group already picked
+RANK_SHOW = 5        # findings per group shown to the writer
+
+_RANK_WRITE_SYSTEM = """You write one sentence per GROUP of findings, to answer \
+a QUESTION. Each sentence is under 35 words and says only what its group's \
+findings say: state their common point, keep the named molecules, genes, sites \
+and numbers it rests on, and never add outside knowledge. Write a sentence for \
+EVERY group, in the order given.
+
+Return ONLY a JSON object: {"claims": [{"claim": "...", "group": "G1"}]}"""
+
+
+def _embed(texts: list) -> list:
+    """Unit vectors for `texts` from the local embedding model, or None."""
+    import urllib.request
+    req = urllib.request.Request(f"{config.OLLAMA_URL}/api/embed", headers={"Content-Type": "application/json"},
+                                 data=json.dumps({"model": config.EMBED_MODEL, "input": texts}).encode())
+    for attempt in range(3):     # a 400 can come while Ollama swaps models in memory
+        try:
+            with urllib.request.urlopen(req, timeout=config.OLLAMA_TIMEOUT) as r:
+                vecs = json.loads(r.read())["embeddings"]
+            break
+        except Exception:
+            time.sleep(5)
+    else:
+        return None
+    norm = lambda v: [x / (sum(y * y for y in v) ** 0.5 or 1) for x in v]
+    return [norm(v) for v in vecs] if len(vecs) == len(texts) else None
+
+
+def _cos(a: list, b: list) -> float:
+    return sum(x * y for x, y in zip(a, b))
+
+
+def _rank_groups(found: list, vecs: list, qvec: list, top: int) -> list:
+    """Groups of finding indices ([[i, ...]]), the best `top` first: each finding
+    joins the first group whose first finding it matches (RANK_SAME), and
+    groups are picked by papers backing them and closeness to the question,
+    less RANK_REPEAT times their likeness to the groups already picked."""
+    groups = []
+    for i, v in enumerate(vecs):
+        g = next((g for g in groups if _cos(v, vecs[g[0]]) >= RANK_SAME), None)
+        g.append(i) if g else groups.append([i])
+    backing = [math.log1p(len({found[i][0] for i in g})) for g in groups]   # 1, 3, 9 papers: 0.2, 0.4, 0.7 of 23
+    value = [0.5 * b / max(backing) + 0.5 * _cos(vecs[g[0]], qvec) for b, g in zip(backing, groups)]
+    picked, left = [], list(range(len(groups)))
+    while left and len(picked) < top:
+        like = lambda k: max((_cos(vecs[groups[k][0]], vecs[groups[p][0]]) for p in picked), default=0)
+        best = max(left, key=lambda k: (1 - RANK_REPEAT) * value[k] - RANK_REPEAT * like(k))
+        picked.append(best)
+        left.remove(best)
+    return [groups[k] for k in picked]
+
+
+def _combine_ranked(question: str, chosen: list, found: list, report) -> tuple:
+    """Group the findings by meaning, rank the groups, write one sentence per
+    top group, then the part check as the merge does. Without an embedding
+    model it falls back to the merge."""
+    report(stage="group", papers=len(chosen), claims=len(found))
+    vecs = _embed([question] + [text for _, text, _ in found])
+    if not vecs:
+        report(stage="no embeddings, merging instead")
+        return _combine_merge(question, chosen, found, report)
+    groups = _rank_groups(found, vecs[1:], vecs[0], RANK_TOP)
+    report(stage="merge", papers=len(chosen), claims=len(found))
+    # A big group shown whole makes a small model write one run-on sentence
+    # that eats the token budget; its first RANK_SHOW findings carry the point.
+    listing = "\n\n".join(f"G{k}:\n" + "\n".join(f"  {found[i][1]}" for i in g[:RANK_SHOW])
+                           for k, g in enumerate(groups, 1))
+    try:
+        data = _parse(_complete(_RANK_WRITE_SYSTEM, f"QUESTION:\n{question}\n\nGROUPS:\n{listing}",
+                                max_tokens=120 * len(groups) + 200))
+    except Exception:
+        data = {}
+    written = {}
+    for c in data.get("claims") or []:
+        m = re.search(r"\d+", str(c.get("group", ""))) if isinstance(c, dict) else None
+        if m and (c.get("claim") or "").strip():
+            written.setdefault(int(m.group(0)) - 1, _strip_ids(c["claim"]))
+    checked = []
+    for k, g in enumerate(groups):
+        # A group the model skipped, or a single finding, keeps its finding's words.
+        text = written.get(k) if len(g) > 1 else None
+        ids, where = set(g), {}
+        if text:
+            report(stage="check", claim=k + 1, claims=len(groups))
+            ids, where = _supporting_parts(text, found, ids)
+        if not ids or not text:
+            text, ids, where = found[g[0]][1], {g[0]} | (ids if text else set(g)), {}
+        checked.append((text, ids, where))
+    return checked, [], bool(data.get("truncated"))
+
+
 COMBINE = {"merge": _combine_merge, "grouped": _combine_grouped,
            "merge_whole": lambda *a: _combine_merge(*a, parts=False),
-           "grouped_parts": _combine_grouped_parts}
+           "grouped_parts": _combine_grouped_parts, "ranked": _combine_ranked}
 
 
 def _doi(p: dict) -> str:
@@ -825,7 +934,7 @@ def _follow(question: str, chosen: list, readable: list, load, report) -> list:
 
 
 def ask_many(question: str, papers: list, progress=None, max_papers: int = None,
-             method: str = "merge", follow=None, depth: str = "standard") -> dict:
+             method: str = None, follow=None, depth: str = "standard") -> dict:
     """Answer `question` from several papers at once.
 
     `papers` is a list of {"label", "fetched", "pages"?, "key"?, "cited_by"?}
@@ -899,7 +1008,7 @@ def ask_many(question: str, papers: list, progress=None, max_papers: int = None,
 
     merged, used = [], set()
     if len(found) > 1:
-        final, out["not_addressed"], out["truncated"] = COMBINE[method](question, chosen, found, report)
+        final, out["not_addressed"], out["truncated"] = COMBINE[method or config.COMBINE](question, chosen, found, report)
         # Each merged claim goes to the vote of the other papers' findings:
         # those that agree back it too; those that contradict it are kept
         # with it, and a claim more original papers contradict is outvoted.

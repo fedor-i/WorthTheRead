@@ -905,3 +905,34 @@ def test_echoed_ids_are_stripped_even_with_a_stray_word():
     # a bracket that isn't a list of ids stays
     assert answer._strip_ids("OCP binds [the core] here") == "OCP binds [the core] here"
     assert answer._strip_ids("Levels rose [P1 vs P2 in Table 3]") == "Levels rose [P1 vs P2 in Table 3]"
+
+
+def test_ranked_groups_paraphrases_ranks_by_papers_and_avoids_repeats():
+    from worth_your_read import answer
+    found = [(1, "GPX4 loss drives ferroptosis", []), (2, "Losing GPX4 causes ferroptosis", []),
+             (3, "GPX4 inactivation triggers ferroptosis", []), (1, "NCOA4 degrades ferritin", []),
+             (2, "Ferroptosis needs iron", [])]
+    vecs = [[1, 0, 0], [0.99, 0.141, 0], [0.98, 0.199, 0], [0, 1, 0], [0.6, 0, 0.8]]
+    groups = answer._rank_groups(found, vecs, [0.6, 0.6, 0.53], top=3)
+    assert groups[0] == [0, 1, 2]                   # three papers say it
+    assert sorted(map(tuple, groups[1:])) == [(3,), (4,)]
+
+
+def test_ranked_writes_one_sentence_per_group_and_keeps_skipped_findings(monkeypatch):
+    from worth_your_read import answer
+    found = [(1, "GPX4 loss drives ferroptosis", ["q1"]), (2, "Losing GPX4 causes ferroptosis", ["q2"]),
+             (1, "NCOA4 degrades ferritin", ["q3"])]
+    monkeypatch.setattr(answer, "_embed", lambda texts: [[1, 0], [1, 0], [0.99, 0.141], [0, 1]])
+    monkeypatch.setattr(answer, "_complete",
+                        lambda system, user, **k: '{"claims": [{"group": "G1", "claim": "GPX4 loss drives ferroptosis [P1, P2]."}]}')
+    monkeypatch.setattr(answer, "_supporting_parts", lambda text, found, ids: (ids, {}))
+    out, gaps, cut = answer._combine_ranked("How?", [{}, {}], found, lambda **k: None)
+    assert [(t, ids) for t, ids, _ in out] == [("GPX4 loss drives ferroptosis.", {0, 1}),
+                                               ("NCOA4 degrades ferritin", {2})]
+
+
+def test_ranked_falls_back_to_the_merge_without_embeddings(monkeypatch):
+    from worth_your_read import answer
+    monkeypatch.setattr(answer, "_embed", lambda texts: None)
+    monkeypatch.setattr(answer, "_combine_merge", lambda *a, **k: ("merged", [], False))
+    assert answer._combine_ranked("How?", [], [(1, "x", [])], lambda **k: None) == ("merged", [], False)
